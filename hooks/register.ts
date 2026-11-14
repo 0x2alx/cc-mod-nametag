@@ -311,14 +311,17 @@ async function busy($: Engine): Promise<boolean> {
   }
 }
 
+// Cheapest check first; the first that finds the session in use ends the tick: a rename or a turn
+// running (in memory), no level due yet (the clock), work in the background (the session's state,
+// then the agent list). Only then is the transcript read, to mark the name.
 async function tick($: Engine, st: Style): Promise<void> {
   if (sleeping || inTurn) return
-  // idle time counts from the moment nothing works any more
-  if (await busy($)) return active($)
   const since = lastActivity
   const idle = (await $.clock.now()) - since
   const n = st.levels.filter(l => idle >= l.ms).length
   if (n <= reached) return
+  // work in the background counts as activity: the idle time starts over
+  if (await busy($)) return active($)
   sleeping = (async () => {
     // activity during the rename resets `reached`; the turn's end then takes the mark off again
     const result = await sleep($, st, n)

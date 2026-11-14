@@ -11,7 +11,7 @@ function world(on: any, opts: { name?: string; size?: number; env?: Record<strin
   const w = {
     text: '{"type":"user","message":"hello"}\n', renames: [] as string[], greps: 0, reads: 0, lists: 0, attempts: 0,
     blocked: false, failRenames: 0, logs: [] as string[], store: new Map<string, unknown>(), gate: undefined as Promise<void> | undefined, id: ID,
-    agents: [] as { id: string; status: string }[], results: {} as Record<string, unknown>,
+    agents: [] as { id: string; status: string }[], results: {} as Record<string, unknown>, agentLists: 0,
     title: (name: string) => { w.text += JSON.stringify({ type: 'custom-title', customTitle: name, sessionId: w.id }) + '\n' },
   }
   const pathOf = () => opts.path ?? `${CONFIG}/projects/-work-demo/${w.id}.jsonl`
@@ -23,7 +23,7 @@ function world(on: any, opts: { name?: string; size?: number; env?: Record<strin
   on('store.delete', (_: unknown, e: { key: string }) => { w.store.delete(e.key); return { value: undefined } })
   on('store.keys', () => ({ value: [...w.store.keys()] }))
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
-  on('agent.list', () => ({ value: w.agents.map(a => ({ description: 'x', type: 'general-purpose', ...a })) }))
+  on('agent.list', () => (w.agentLists++, { value: w.agents.map(a => ({ description: 'x', type: 'general-purpose', ...a })) }))
   on('tool.call', (_: unknown, e: { tool: string }) => ({ result: w.results[e.tool] ?? {} }))
   on('prompt.submit', (_: unknown, e: { text: string }) => ({ text: e.text }))
   on('turn.start', (_: unknown, e: { turnId: string }) => ({ turnId: e.turnId }))
@@ -638,6 +638,19 @@ test('a running agent keeps the session awake; an idle teammate does not', async
   await clock.advance(9 * MIN)
   expect(w.renames).toEqual([])
   await clock.advance(2 * MIN)
+  expect(w.renames).toEqual(['💤 Builder'])
+})
+
+test('no level due: the tick ends before asking about agents or reading the transcript', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  await start($)
+  const reads = w.reads
+  await clock.advance(9 * MIN)
+  expect(w.agentLists).toBe(0)
+  expect(w.reads).toBe(reads)
+  await clock.advance(2 * MIN)
+  expect(w.agentLists).toBe(1)
   expect(w.renames).toEqual(['💤 Builder'])
 })
 
