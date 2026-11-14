@@ -1,10 +1,10 @@
 // What nametag keeps in the session's state (it outlives a hot reload of the mod).
 //   transcript: this session's transcript, once found
-//   mark: whether the session name carries the prefix: 'asleep', 'awake', or 'unknown' (not read yet)
-export type Mark = 'asleep' | 'awake' | 'unknown'
+//   level: how many idle levels the name's mark carries: 0 awake, null not read yet
+export type MarkLevel = number | null
 
 declare module 'claude-code' {
   interface PluginState {
-    'nametag': { transcript: string | null; mark: Mark }
+    'nametag': { transcript: string | null; level: MarkLevel }
   }
 }

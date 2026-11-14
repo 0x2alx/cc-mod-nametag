@@ -5,11 +5,12 @@ const CONFIG = '/u/.claude'
 const PATH = `${CONFIG}/projects/-work-demo/${ID}.jsonl`
 const PROJECTS = ['-other-project', '-work-demo']
 const MIN = 60 * 1000
+const HOUR = 60 * MIN
 
 // A fake world beneath the mod: one transcript, /rename appending a title row to it.
 function world(on: any, opts: { name?: string; size?: number; env?: Record<string, string>; path?: string } = {}) {
   const path = opts.path ?? PATH
-  const w = { text: '{"type":"user","message":"hello"}\n', renames: [] as string[], greps: 0, reads: 0 }
+  const w = { text: '{"type":"user","message":"hello"}\n', renames: [] as string[], greps: 0, reads: 0, blocked: false }
   const title = (name: string) => { w.text += JSON.stringify({ type: 'custom-title', customTitle: name, sessionId: ID }) + '\n' }
   if (opts.name !== undefined) title(opts.name)
   mock.env(on, opts.env ?? { CLAUDE_CONFIG_DIR: CONFIG })
@@ -19,7 +20,7 @@ function world(on: any, opts: { name?: string; size?: number; env?: Record<strin
   on('session.id', () => ({ value: ID }))
   on('session.root', () => ({ value: '/work/demo' }))
   on('fs.stat', (_: unknown, e: { path: string }) => {
-    if (e.path !== path) throw new Error('ENOENT')
+    if (e.path !== path || w.blocked) throw new Error('ENOENT')
     return { value: { kind: 'file', size: opts.size ?? w.text.length, mtimeMs: 0, isLink: false } }
   })
   on('fs.read', (_: unknown, e: { path: string }) => {
@@ -60,11 +61,11 @@ test('sleeps after 10 idle minutes and wakes after the next turn', async ($, on)
   await clock.advance(9 * MIN)
   expect(w.renames).toEqual([])
   await clock.advance(2 * MIN)
-  expect(w.renames).toEqual(['💤💤💤 Builder'])
+  expect(w.renames).toEqual(['💤 Builder'])
   await clock.advance(30 * MIN) // stays asleep, no second rename
-  expect(w.renames).toEqual(['💤💤💤 Builder'])
+  expect(w.renames).toEqual(['💤 Builder'])
   await turn($, 't1')
-  expect(w.renames).toEqual(['💤💤💤 Builder', 'Builder'])
+  expect(w.renames).toEqual(['💤 Builder', 'Builder'])
   await turn($, 't2') // awake: no transcript read, no rename
   expect(w.renames.length).toBe(2)
 })
@@ -78,7 +79,7 @@ test('activity resets the idle timer', async ($, on) => {
   await clock.advance(8 * MIN)
   expect(w.renames).toEqual([])
   await clock.advance(3 * MIN)
-  expect(w.renames).toEqual(['💤💤💤 Builder'])
+  expect(w.renames).toEqual(['💤 Builder'])
 })
 
 test('a session that was never named is left alone', async ($, on) => {
@@ -103,24 +104,75 @@ test('a transcript over 4 MiB is searched with grep', async ($, on) => {
   const w = world(on, { name: 'Big one', size: 20 * 1024 * 1024 })
   await start($)
   await clock.advance(11 * MIN)
-  expect(w.renames).toEqual(['💤💤💤 Big one'])
+  expect(w.renames).toEqual(['💤 Big one'])
   expect(w.greps).toBeGreaterThan(0)
   expect(w.reads).toBe(0)
 })
 
-test('options: idle minutes and prefix', { options: { idle_minutes: 2, prefix: '[idle] ' } }, async ($, on) => {
+test('options: delays and emojis per level', { options: { level1_minutes: 2, level1_emoji: '1️⃣', level2_minutes: 5, level2_emoji: '2️⃣', level3_minutes: 9, level3_emoji: '3️⃣' } }, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on, { name: 'Builder' })
   await start($)
   await clock.advance(3 * MIN)
-  expect(w.renames).toEqual(['[idle] Builder'])
+  await clock.advance(3 * MIN)
+  await clock.advance(4 * MIN)
+  expect(w.renames).toEqual(['1️⃣ Builder', '1️⃣2️⃣ Builder', '1️⃣2️⃣3️⃣ Builder'])
   await turn($, 't1')
-  expect(w.renames).toEqual(['[idle] Builder', 'Builder'])
+  expect(w.renames.at(-1)).toBe('Builder')
 })
 
-test('wakes a name marked by an older prefix', async ($, on) => {
+test('an empty emoji turns a level off', { options: { level2_emoji: '' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  await start($)
+  await clock.advance(11 * MIN)
+  await clock.advance(4 * HOUR)
+  await clock.advance(9 * HOUR)
+  expect(w.renames).toEqual(['💤 Builder', '💤💤 Builder'])
+})
+
+test('climbs three levels: 10 minutes, 3 hours, 12 hours', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  await start($)
+  await clock.advance(11 * MIN)
+  expect(w.renames).toEqual(['💤 Builder'])
+  await clock.advance(2 * HOUR + 40 * MIN) // 2h51m
+  expect(w.renames).toEqual(['💤 Builder'])
+  await clock.advance(10 * MIN) // 3h01m
+  expect(w.renames).toEqual(['💤 Builder', '💤💤 Builder'])
+  await clock.advance(9 * HOUR) // 12h01m
+  expect(w.renames).toEqual(['💤 Builder', '💤💤 Builder', '💤💤💤 Builder'])
+  await clock.advance(24 * HOUR) // stays at level 3
+  expect(w.renames.length).toBe(3)
+  await turn($, 't1')
+  expect(w.renames.at(-1)).toBe('Builder')
+})
+
+test('an unreadable spell ends straight at the level reached', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  await start($)
+  w.blocked = true
+  await clock.advance(4 * HOUR)
+  expect(w.renames).toEqual([])
+  w.blocked = false
+  await clock.advance(1 * MIN)
+  expect(w.renames).toEqual(['💤💤 Builder'])
+})
+
+test('a name that only starts with the emoji is not taken for a mark', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: '💤Builder' })
+  await start($)
+  await clock.advance(11 * MIN)
+  await turn($, 't1')
+  expect(w.renames).toEqual(['💤 💤Builder', '💤Builder'])
+})
+
+test('wakes a name marked by an older version', async ($, on) => {
   mock.clock(on, { now: 1_000_000 })
-  const w = world(on, { name: '💤 Builder' })
+  const w = world(on, { name: '💤💤💤 Builder' })
   await start($)
   await turn($, 't1')
   expect(w.renames).toEqual(['Builder'])
@@ -131,7 +183,7 @@ test('uses HOME/.claude without CLAUDE_CONFIG_DIR', async ($, on) => {
   const w = world(on, { name: 'Builder', env: { HOME: '/u' } })
   await start($)
   await clock.advance(11 * MIN)
-  expect(w.renames).toEqual(['💤💤💤 Builder'])
+  expect(w.renames).toEqual(['💤 Builder'])
 })
 
 test('a transcript it cannot find leaves the name alone', async ($, on) => {
@@ -147,7 +199,7 @@ test('finds the transcript in a shortened project folder by its session id', asy
   const w = world(on, { name: 'Builder', path: `${CONFIG}/projects/-work-de-1a2b3c/${ID}.jsonl` })
   await start($)
   await clock.advance(11 * MIN)
-  expect(w.renames).toEqual(['💤💤💤 Builder'])
+  expect(w.renames).toEqual(['💤 Builder'])
 })
 
 test('a subagent turn does not wake the session', async ($, on) => {
@@ -156,5 +208,5 @@ test('a subagent turn does not wake the session', async ($, on) => {
   await start($)
   await clock.advance(11 * MIN)
   await $.turn.complete({ answer: 'ok', durationMs: 1, isAborted: false, turnId: 's1', agentId: 'a1', reason: 'answer' } as any)
-  expect(w.renames).toEqual(['💤💤💤 Builder'])
+  expect(w.renames).toEqual(['💤 Builder'])
 })

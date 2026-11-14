@@ -1,11 +1,12 @@
 # nametag
 
-A [Claude Code](https://claude.com/claude-code) mod that marks idle sessions. When a session has had no prompt and no turn for a while (10 minutes by default), it puts `💤💤💤 ` in front of the session's name. When the next turn ends, it takes the mark off again.
+A [Claude Code](https://claude.com/claude-code) mod that marks idle sessions, in up to three steps. When a session has had no prompt and no turn for 10 minutes, it puts `💤 ` in front of the session's name; after 3 hours the mark becomes `💤💤 `, after 12 hours `💤💤💤 `. When the next turn ends, it takes the mark off again. The delays and the emoji of each step are options.
 
 This helps when you run several named sessions, for example in tmux or through Remote Control. You can see at a glance which ones are waiting on you and which have been quiet for a while.
 
 ```
-Builder          →  (10 quiet minutes)  →  💤💤💤 Builder  →  (you send a message)  →  Builder
+Builder  →  10 min  →  💤 Builder  →  3 h  →  💤💤 Builder  →  12 h  →  💤💤💤 Builder
+                                              (you send a message, the turn ends)  →  Builder
 ```
 
 ## Install
@@ -28,26 +29,33 @@ To try it from a local copy without installing, run `claude --plugin-dir /path/t
 
 ## Options
 
-You can set both options in `/config`, or under `pluginConfigs` in your settings:
+Set them in `/config`, or under `pluginConfigs` in your settings. Each level has a delay and an emoji:
 
 | Option | Default | What it does |
 | --- | --- | --- |
-| `idle_minutes` | `10` | Minutes with no prompt and no turn before the name gets the prefix (1 to 1440). |
-| `prefix` | `💤💤💤 ` | The text put in front of the name. Any text works, for example `[idle] `. |
+| `level1_minutes` | `10` | Idle minutes before the first emoji is added. |
+| `level1_emoji` | `💤` | The first emoji of the mark. |
+| `level2_minutes` | `180` | Idle minutes before the second emoji is added. |
+| `level2_emoji` | `💤` | The second emoji. |
+| `level3_minutes` | `720` | Idle minutes before the third emoji is added. |
+| `level3_emoji` | `💤` | The third emoji. |
 
-The mod checks once a minute, so the mark appears between `idle_minutes` and `idle_minutes + 1` minutes after the last activity.
+Minutes run from 1 to 10080 (a week), counted from the last activity, not from the previous level. An empty emoji turns that level off, so for a single step set `level2_emoji` and `level3_emoji` to empty. The emojis can differ, for example `1️⃣`, `2️⃣`, `3️⃣` gives `1️⃣ Builder`, then `1️⃣2️⃣ Builder`, then `1️⃣2️⃣3️⃣ Builder`. An "emoji" can be any short text without spaces.
+
+The mod checks once a minute, so each step lands within a minute of its delay. If the levels' minutes are out of order, the mod sorts them by minutes.
 
 ## What it does, exactly
 
-- **Only some sessions.** It acts only in interactive sessions. It skips `claude -p`, the SDK and other headless runs, and it acts only on sessions that have a name, meaning `/rename` was used at least once. It leaves unnamed sessions alone.
+- **Only some sessions.** It acts only in interactive sessions. It skips `claude -p`, the SDK and other headless runs, and it acts only on sessions that have a name, meaning `/rename` was used at least once or the session was started with `--name`. It leaves unnamed sessions alone.
 - **What counts as activity.** Your prompts, and every turn of the main conversation, including turns started by background tasks or other tools. Subagent turns don't count.
 - **When the mark comes off.** At the end of the next turn, not when you press Enter. Claude Code doesn't let a rename run while a turn holds the session, so the name keeps the mark while that turn runs.
 - **Renaming during a sleep.** If you rename a session while it is marked, your new name stands, and the mod doesn't put the old one back.
-- **Older marks.** If the prefix is one symbol repeated (like the default), a name that starts with any run of that symbol also counts as marked and is cleaned up on the next turn.
+- **What counts as a mark.** A run of the configured emojis (or `💤`, the mark of earlier versions) at the start of the name, followed by a space. So `💤💤💤 Builder` from an older version wakes cleanly, while a name like `💤Builder`, with no space after the emoji, is left as you wrote it. Avoid an emoji that your own names start with followed by a space.
+- **Named at launch.** `claude --name <name>` (or `-n`) counts as a name, the same as `/rename`. A name given only to `--remote-control <name>` doesn't reach the transcript, so the mod skips that session; add `--name` too, or `/rename` it once.
 
 ## Cost
 
-Each rename goes through `/rename`, which adds a short "Session renamed to: …" line to the conversation. The model reads that line, so a sleep and wake cost about 30 input tokens. A session that is never idle for long costs nothing.
+Each rename goes through `/rename`, which adds a short "Session renamed to: …" line to the conversation. The model reads that line, so each step and the wake cost about 15 input tokens each: about 30 for a short break, about 60 for a night away. A session that is never idle for long costs nothing.
 
 ## Known limits
 

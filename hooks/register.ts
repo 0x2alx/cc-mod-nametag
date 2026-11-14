@@ -1,61 +1,73 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Mark } from '../types'
+import type { MarkLevel } from '../types'
 
-// nametag: after `idle_minutes` with no prompt and no turn, put `prefix` in front of the session's
-// name (via /rename); at the end of the next turn, take it off again. Interactive sessions only,
-// and only sessions that have a name (/rename was used at least once).
+// nametag: marks an idle session's name in up to three steps. Each level has a delay and an
+// emoji: after level 1's delay with no prompt and no turn the name becomes "💤 name", after level
+// 2's "💤💤 name", after level 3's "💤💤💤 name" (via /rename). At the end of the next turn the
+// mark comes off. Interactive sessions only, and only sessions that have a name (/rename was used
+// at least once, or the session was started with --name).
 //
 // No API returns the session's name, so it is read from the transcript: the newest
 // {"type":"custom-title","customTitle":...} row. That row format is undocumented and may change.
 
 type Engine = EngineInterface
 
+export type Level = { ms: number; emoji: string }
+
 const CHECK_MS = 60 * 1000
 const FS_READ_MAX = 4 * 1024 * 1024 // $.fs.read refuses bigger files
 const TITLE_ROW = '"type":"custom-title"'
+const LEGACY = '💤' // the mark of earlier versions; always recognised
+const DEFAULTS: readonly [number, string][] = [[10, '💤'], [180, '💤'], [720, '💤']]
 
 const transcript = atom({ plugin: 'nametag', key: 'transcript' } as const, null)
-const mark = atom({ plugin: 'nametag', key: 'mark' } as const, 'unknown' as Mark)
+// How many levels the name carries: 0 awake, null not read yet.
+const level = atom({ plugin: 'nametag', key: 'level' } as const, null as MarkLevel)
 
 let lastActivity = 0
 let inTurn = false
 let isBusy = false
-let isSleptThisIdle = false
+let reached = 0 // levels applied (or found unneeded) during this idle spell
 let timer: { cancel(): void } | undefined
 
-// ---- the prefix ----------------------------------------------------------------------------
+// ---- the levels and the mark ---------------------------------------------------------------
 
-// The visible part of the prefix ("💤💤💤" for "💤💤💤 ").
-function core(prefix: string): string {
-  return prefix.trim()
+// The configured levels, earliest first. A level with an empty emoji is off.
+export function levels(options: Record<string, unknown>): Level[] {
+  const out: Level[] = []
+  DEFAULTS.forEach(([minutes, emoji], i) => {
+    const m = options[`level${i + 1}_minutes`]
+    const e = options[`level${i + 1}_emoji`]
+    const mins = typeof m === 'number' && m > 0 ? m : minutes
+    const em = typeof e === 'string' ? e.trim() : emoji
+    if (em !== '') out.push({ ms: mins * 60 * 1000, emoji: em })
+  })
+  return out.sort((a, b) => a.ms - b.ms)
 }
 
-// When the prefix is one symbol repeated ("💤💤💤"), that symbol: any run of it counts as the mark,
-// so a name marked with an older or shorter prefix ("💤 ") still wakes cleanly.
-function unit(prefix: string): string | null {
-  const chars = [...core(prefix)]
-  const first = chars[0]
-  return first !== undefined && chars.every(c => c === first) ? first : null
+// The mark for the first `n` levels: their emojis side by side, then a space.
+export function markFor(lv: readonly Level[], n: number): string {
+  const s = lv.slice(0, n).map(l => l.emoji).join('')
+  return s === '' ? '' : `${s} `
 }
 
-export function isMarked(name: string, prefix: string): boolean {
-  const c = core(prefix)
-  const u = unit(prefix)
-  return c !== '' && (name.startsWith(c) || (u !== null && name.startsWith(u)))
-}
-
-export function unmarked(name: string, prefix: string): string {
-  const c = core(prefix)
-  const u = unit(prefix)
-  let out = name
-  for (let changed = c !== ''; changed; ) {
-    changed = false
-    if (out.startsWith(c)) { out = out.slice(c.length).trimStart(); changed = true }
-    else if (u !== null && out.startsWith(u)) { out = out.slice(u.length).trimStart(); changed = true }
+// `name` without its mark: a leading run of level emojis (or the legacy 💤) followed by a space.
+// A name that merely starts with one of those emojis, with no space after the run, is left as is.
+export function unmarked(name: string, lv: readonly Level[]): string {
+  const units = [...new Set([...lv.map(l => l.emoji), LEGACY])].sort((a, b) => b.length - a.length)
+  let i = 0
+  for (let hit = true; hit; ) {
+    hit = false
+    for (const u of units) if (name.startsWith(u, i)) { i += u.length; hit = true; break }
   }
-  return out
+  if (i === 0 || !/^\s/.test(name.slice(i))) return name
+  return name.slice(i).trimStart()
+}
+
+export function isMarked(name: string, lv: readonly Level[]): boolean {
+  return unmarked(name, lv) !== name
 }
 
 // ---- reading the name ----------------------------------------------------------------------
@@ -152,33 +164,38 @@ async function rename($: Engine, name: string): Promise<boolean> {
   }
 }
 
-// Puts the prefix on. Returns false when the name couldn't be read, so the next tick tries again.
-async function sleep($: Engine, prefix: string): Promise<boolean> {
+// Marks the name with the first `n` levels. Returns false when the name couldn't be read, so the
+// next tick tries again.
+async function sleep($: Engine, lv: readonly Level[], n: number): Promise<boolean> {
   const name = await currentName($)
   if (name === undefined) return false
   if (name === null || name.trim() === '') return true
-  if (isMarked(name, prefix)) { await update($, mark, () => 'asleep'); return true }
-  if (await rename($, prefix + name)) await update($, mark, () => 'asleep')
+  const plain = unmarked(name, lv)
+  if (plain === '') return true
+  const want = markFor(lv, n) + plain
+  if (want === name || (await rename($, want))) await update($, level, () => n)
   return true
 }
 
-async function wake($: Engine, prefix: string): Promise<void> {
-  if ((await read($, mark)) === 'awake') return
+async function wake($: Engine, lv: readonly Level[]): Promise<void> {
+  if ((await read($, level)) === 0) return
   const name = await currentName($)
   if (name === undefined) return
-  if (name !== null && isMarked(name, prefix)) {
-    const plain = unmarked(name, prefix)
-    if (plain === '' || !(await rename($, plain))) return
+  if (name !== null) {
+    const plain = unmarked(name, lv)
+    if (plain !== name && (plain === '' || !(await rename($, plain)))) return
   }
-  await update($, mark, () => 'awake')
+  await update($, level, () => 0)
 }
 
-async function tick($: Engine, idleMs: number, prefix: string): Promise<void> {
-  if (isBusy || inTurn || isSleptThisIdle) return
-  if ((await $.clock.now()) - lastActivity < idleMs) return
+async function tick($: Engine, lv: readonly Level[]): Promise<void> {
+  if (isBusy || inTurn) return
+  const idle = (await $.clock.now()) - lastActivity
+  const n = lv.filter(l => idle >= l.ms).length
+  if (n <= reached) return
   isBusy = true
   try {
-    isSleptThisIdle = await sleep($, prefix)
+    if (await sleep($, lv, n)) reached = n
   } finally {
     isBusy = false
   }
@@ -186,15 +203,13 @@ async function tick($: Engine, idleMs: number, prefix: string): Promise<void> {
 
 async function active($: Engine): Promise<void> {
   lastActivity = await $.clock.now()
-  isSleptThisIdle = false
+  reached = 0
 }
 
 // ---- hooks ---------------------------------------------------------------------------------
 
 export const register: Register = (on, options) => {
-  const minutes = typeof options.idle_minutes === 'number' && options.idle_minutes > 0 ? options.idle_minutes : 10
-  const idleMs = minutes * 60 * 1000
-  const prefix = typeof options.prefix === 'string' && options.prefix.trim() !== '' ? options.prefix : '💤💤💤 '
+  const lv = levels(options)
 
   on('session.start', async ($, e, next) => {
     const r = await next(e)
@@ -203,7 +218,7 @@ export const register: Register = (on, options) => {
     if (!e.isInteractive) return r
     await active($)
     inTurn = false
-    timer = $.clock.every(CHECK_MS, () => { void tick($, idleMs, prefix) })
+    if (lv.length) timer = $.clock.every(CHECK_MS, () => { void tick($, lv) })
     return r
   })
 
@@ -219,7 +234,7 @@ export const register: Register = (on, options) => {
     if (e.agentId) return r
     inTurn = false
     await active($)
-    await wake($, prefix)
+    await wake($, lv)
     return r
   })
 }

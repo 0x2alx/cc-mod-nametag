@@ -1,27 +1,62 @@
 {
   "name": "nametag",
-  "version": "0.3.0",
-  "description": "Marks a session's name with 💤 after a quiet spell and clears the mark at the next turn",
-  "author": { "name": "0x2alx" },
+  "version": "0.4.0",
+  "description": "Marks an idle session's name in up to three steps (💤, 💤💤, 💤💤💤) and clears the mark at the next turn",
+  "author": {
+    "name": "0x2alx"
+  },
   "homepage": "https://github.com/0x2alx/cc-mod-nametag",
   "repository": "https://github.com/0x2alx/cc-mod-nametag",
   "license": "MIT",
-  "keywords": ["mod", "session", "idle", "rename"],
+  "keywords": [
+    "mod",
+    "session",
+    "idle",
+    "rename"
+  ],
   "types": "./types/index.d.ts",
   "userConfig": {
-    "idle_minutes": {
+    "level1_minutes": {
       "type": "number",
-      "title": "Idle minutes",
-      "description": "Minutes with no prompt or turn before the session name gets the prefix",
+      "title": "Level 1: idle minutes",
+      "description": "Minutes with no prompt or turn before the first emoji is added",
       "default": 10,
       "min": 1,
-      "max": 1440
+      "max": 10080
     },
-    "prefix": {
+    "level1_emoji": {
       "type": "string",
-      "title": "Prefix",
-      "description": "Put in front of the session name while it is idle",
-      "default": "💤💤💤 "
+      "title": "Level 1: emoji",
+      "description": "The first emoji in the mark; empty turns this level off",
+      "default": "💤"
+    },
+    "level2_minutes": {
+      "type": "number",
+      "title": "Level 2: idle minutes",
+      "description": "Minutes with no prompt or turn before the second emoji is added",
+      "default": 180,
+      "min": 1,
+      "max": 10080
+    },
+    "level2_emoji": {
+      "type": "string",
+      "title": "Level 2: emoji",
+      "description": "The second emoji in the mark; empty turns this level off",
+      "default": "💤"
+    },
+    "level3_minutes": {
+      "type": "number",
+      "title": "Level 3: idle minutes",
+      "description": "Minutes with no prompt or turn before the third emoji is added",
+      "default": 720,
+      "min": 1,
+      "max": 10080
+    },
+    "level3_emoji": {
+      "type": "string",
+      "title": "Level 3: emoji",
+      "description": "The third emoji in the mark; empty turns this level off",
+      "default": "💤"
     }
   }
 }
