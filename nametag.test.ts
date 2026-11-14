@@ -210,3 +210,58 @@ test('a subagent turn does not wake the session', async ($, on) => {
   await $.turn.complete({ answer: 'ok', durationMs: 1, isAborted: false, turnId: 's1', agentId: 'a1', reason: 'answer' } as any)
   expect(w.renames).toEqual(['💤 Builder'])
 })
+
+test('style: the mark after the name', { options: { position: 'end' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder 😑' })
+  await start($)
+  await clock.advance(11 * MIN)
+  await clock.advance(3 * HOUR)
+  await turn($, 't1')
+  expect(w.renames).toEqual(['Builder 😑 💤', 'Builder 😑 💤💤', 'Builder 😑'])
+})
+
+test('style: a separator', { options: { separator: '-' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  await start($)
+  await clock.advance(11 * MIN)
+  await clock.advance(3 * HOUR)
+  await turn($, 't1')
+  expect(w.renames).toEqual(['💤 - Builder', '💤💤 - Builder', 'Builder'])
+})
+
+test('style: brackets, separator and end together', { options: { position: 'end', separator: '|', brackets: '[]' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  await start($)
+  await clock.advance(11 * MIN)
+  await clock.advance(3 * HOUR)
+  await turn($, 't1')
+  expect(w.renames).toEqual(['Builder | [💤]', 'Builder | [💤💤]', 'Builder'])
+})
+
+test('style: brackets alone', { options: { brackets: '()' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  await start($)
+  await clock.advance(11 * MIN)
+  await turn($, 't1')
+  expect(w.renames).toEqual(['(💤) Builder', 'Builder'])
+})
+
+test('a new style still wakes a name marked the old way', { options: { position: 'end', separator: '-' } }, async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: '💤💤💤 Builder' })
+  await start($)
+  await turn($, 't1')
+  expect(w.renames).toEqual(['Builder'])
+})
+
+test('a name ending in an unmarked emoji is left alone', { options: { position: 'end' } }, async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder 😑' })
+  await start($)
+  await turn($, 't1')
+  expect(w.renames).toEqual([])
+})

@@ -1,6 +1,6 @@
 {
   "name": "nametag",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Marks an idle session's name in up to three steps (💤, 💤💤, 💤💤💤) and clears the mark at the next turn",
   "author": {
     "name": "0x2alx"
@@ -57,6 +57,35 @@
       "title": "Level 3: emoji",
       "description": "The third emoji in the mark; empty turns this level off",
       "default": "💤"
+    },
+    "position": {
+      "type": "string",
+      "title": "Mark position",
+      "description": "Put the mark before the name (start) or after it (end)",
+      "default": "start",
+      "options": [
+        "start",
+        "end"
+      ]
+    },
+    "separator": {
+      "type": "string",
+      "title": "Separator",
+      "description": "Text between the mark and the name, with a space on each side (for example -); empty for just a space",
+      "default": ""
+    },
+    "brackets": {
+      "type": "string",
+      "title": "Brackets",
+      "description": "Wrap the mark's emojis in brackets",
+      "default": "none",
+      "options": [
+        "none",
+        "[]",
+        "()",
+        "{}",
+        "<>"
+      ]
     }
   }
 }

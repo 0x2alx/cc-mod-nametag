@@ -42,6 +42,24 @@ Set them in `/config`, or under `pluginConfigs` in your settings. Each level has
 
 Minutes run from 1 to 10080 (a week), counted from the last activity, not from the previous level. An empty emoji turns that level off, so for a single step set `level2_emoji` and `level3_emoji` to empty. The emojis can differ, for example `1️⃣`, `2️⃣`, `3️⃣` gives `1️⃣ Builder`, then `1️⃣2️⃣ Builder`, then `1️⃣2️⃣3️⃣ Builder`. An "emoji" can be any short text without spaces.
 
+How the mark sits next to the name:
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `position` | `start` | `start` puts the mark before the name, `end` after it. |
+| `separator` | empty | Text between the mark and the name, with a space on each side. Empty means just a space. |
+| `brackets` | `none` | Wraps the emojis in `[]`, `()`, `{}` or `<>`. |
+
+For example, at level 2:
+
+| Settings | Name |
+| --- | --- |
+| defaults | `💤💤 Builder` |
+| `position: end` | `Builder 💤💤` |
+| `separator: -` | `💤💤 - Builder` |
+| `brackets: []` | `[💤💤] Builder` |
+| `position: end`, `separator: \|`, `brackets: ()` | `Builder \| (💤💤)` |
+
 The mod checks once a minute, so each step lands within a minute of its delay. If the levels' minutes are out of order, the mod sorts them by minutes.
 
 ## What it does, exactly
@@ -50,7 +68,7 @@ The mod checks once a minute, so each step lands within a minute of its delay. I
 - **What counts as activity.** Your prompts, and every turn of the main conversation, including turns started by background tasks or other tools. Subagent turns don't count.
 - **When the mark comes off.** At the end of the next turn, not when you press Enter. Claude Code doesn't let a rename run while a turn holds the session, so the name keeps the mark while that turn runs.
 - **Renaming during a sleep.** If you rename a session while it is marked, your new name stands, and the mod doesn't put the old one back.
-- **What counts as a mark.** A run of the configured emojis (or `💤`, the mark of earlier versions) at the start of the name, followed by a space. So `💤💤💤 Builder` from an older version wakes cleanly, while a name like `💤Builder`, with no space after the emoji, is left as you wrote it. Avoid an emoji that your own names start with followed by a space.
+- **What counts as a mark.** A run of the configured emojis (or `💤`, the mark of earlier versions), in the configured brackets, joined to the name by a space or by the separator, at the configured end of the name. A mark in the default style (`💤💤 Builder`) is always recognised too, so changing the style still wakes names marked the old way. So `💤💤💤 Builder` from an older version wakes cleanly, while a name like `💤Builder`, with no space after the emoji, is left as you wrote it. Avoid an emoji that your own names start (or, with `position: end`, end) with, next to a space.
 - **Named at launch.** `claude --name <name>` (or `-n`) counts as a name, the same as `/rename`. A name given only to `--remote-control <name>` doesn't reach the transcript, so the mod skips that session; add `--name` too, or `/rename` it once.
 
 ## Cost

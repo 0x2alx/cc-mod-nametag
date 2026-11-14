@@ -5,8 +5,9 @@ import type { MarkLevel } from '../types'
 
 // nametag: marks an idle session's name in up to three steps. Each level has a delay and an
 // emoji: after level 1's delay with no prompt and no turn the name becomes "💤 name", after level
-// 2's "💤💤 name", after level 3's "💤💤💤 name" (via /rename). At the end of the next turn the
-// mark comes off. Interactive sessions only, and only sessions that have a name (/rename was used
+// 2's "💤💤 name", after level 3's "💤💤💤 name" (via /rename). Options put the mark after the
+// name, join it with a separator, or wrap it in brackets. At the end of the next turn the mark
+// comes off. Interactive sessions only, and only sessions that have a name (/rename was used
 // at least once, or the session was started with --name).
 //
 // No API returns the session's name, so it is read from the transcript: the newest
@@ -47,27 +48,76 @@ export function levels(options: Record<string, unknown>): Level[] {
   return out.sort((a, b) => a.ms - b.ms)
 }
 
-// The mark for the first `n` levels: their emojis side by side, then a space.
-export function markFor(lv: readonly Level[], n: number): string {
-  const s = lv.slice(0, n).map(l => l.emoji).join('')
-  return s === '' ? '' : `${s} `
+// How the mark sits next to the name: before it (default) or after it, joined by a space or by
+// " <separator> ", the emojis optionally in brackets.
+export type Style = { levels: Level[]; atEnd: boolean; sep: string; open: string; close: string }
+
+const BRACKETS: Record<string, [string, string]> = { '[]': ['[', ']'], '()': ['(', ')'], '{}': ['{', '}'], '<>': ['<', '>'] }
+
+export function style(options: Record<string, unknown>): Style {
+  const sep = typeof options.separator === 'string' ? options.separator.trim() : ''
+  const pair = typeof options.brackets === 'string' ? BRACKETS[options.brackets.replace(/\s/g, '')] : undefined
+  return { levels: levels(options), atEnd: options.position === 'end', sep, open: pair?.[0] ?? '', close: pair?.[1] ?? '' }
 }
 
-// `name` without its mark: a leading run of level emojis (or the legacy 💤) followed by a space.
-// A name that merely starts with one of those emojis, with no space after the run, is left as is.
-export function unmarked(name: string, lv: readonly Level[]): string {
-  const units = [...new Set([...lv.map(l => l.emoji), LEGACY])].sort((a, b) => b.length - a.length)
-  let i = 0
+// The style of versions before 0.5: the emojis, a space, the name. Always recognised.
+function legacy(st: Style): Style {
+  return { levels: st.levels, atEnd: false, sep: '', open: '', close: '' }
+}
+
+// `plain` marked with the first `n` levels.
+export function marked(plain: string, st: Style, n: number): string {
+  const emojis = st.levels.slice(0, n).map(l => l.emoji).join('')
+  if (emojis === '') return plain
+  const mark = st.open + emojis + st.close
+  const join = st.sep === '' ? ' ' : ` ${st.sep} `
+  return st.atEnd ? plain + join + mark : mark + join + plain
+}
+
+function escape(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+// `name` without a mark in style `st`, or null when it carries none. A mark is the brackets (if
+// any) around a run of level emojis (or the legacy 💤), joined to the name by whitespace or by the
+// separator between whitespace. A name that merely starts with an emoji, with no space after it,
+// is left alone.
+function strip(name: string, st: Style): string | null {
+  const units = [...new Set([...st.levels.map(l => l.emoji), LEGACY])].sort((a, b) => b.length - a.length)
+  const join = st.sep === '' ? /\s+/ : new RegExp(`\\s+${escape(st.sep)}\\s+`)
+  if (!st.atEnd) {
+    let i = 0
+    if (st.open) { if (!name.startsWith(st.open)) return null; i = st.open.length }
+    const run = i
+    for (let hit = true; hit; ) {
+      hit = false
+      for (const u of units) if (name.startsWith(u, i)) { i += u.length; hit = true; break }
+    }
+    if (i === run) return null
+    if (st.close) { if (!name.startsWith(st.close, i)) return null; i += st.close.length }
+    const m = new RegExp(`^${join.source}`).exec(name.slice(i))
+    return m ? name.slice(i + m[0].length) : null
+  }
+  let j = name.length
+  if (st.close) { if (!name.endsWith(st.close)) return null; j -= st.close.length }
+  const run = j
   for (let hit = true; hit; ) {
     hit = false
-    for (const u of units) if (name.startsWith(u, i)) { i += u.length; hit = true; break }
+    for (const u of units) if (name.endsWith(u, j)) { j -= u.length; hit = true; break }
   }
-  if (i === 0 || !/^\s/.test(name.slice(i))) return name
-  return name.slice(i).trimStart()
+  if (j === run) return null
+  if (st.open) { if (!name.endsWith(st.open, j)) return null; j -= st.open.length }
+  const m = new RegExp(`${join.source}$`).exec(name.slice(0, j))
+  return m ? name.slice(0, j - m[0].length) : null
 }
 
-export function isMarked(name: string, lv: readonly Level[]): boolean {
-  return unmarked(name, lv) !== name
+// `name` without its mark, in the configured style or the legacy one; `name` itself if unmarked.
+export function unmarked(name: string, st: Style): string {
+  return strip(name, st) ?? strip(name, legacy(st)) ?? name
+}
+
+export function isMarked(name: string, st: Style): boolean {
+  return unmarked(name, st) !== name
 }
 
 // ---- reading the name ----------------------------------------------------------------------
@@ -166,36 +216,36 @@ async function rename($: Engine, name: string): Promise<boolean> {
 
 // Marks the name with the first `n` levels. Returns false when the name couldn't be read, so the
 // next tick tries again.
-async function sleep($: Engine, lv: readonly Level[], n: number): Promise<boolean> {
+async function sleep($: Engine, st: Style, n: number): Promise<boolean> {
   const name = await currentName($)
   if (name === undefined) return false
   if (name === null || name.trim() === '') return true
-  const plain = unmarked(name, lv)
+  const plain = unmarked(name, st)
   if (plain === '') return true
-  const want = markFor(lv, n) + plain
+  const want = marked(plain, st, n)
   if (want === name || (await rename($, want))) await update($, level, () => n)
   return true
 }
 
-async function wake($: Engine, lv: readonly Level[]): Promise<void> {
+async function wake($: Engine, st: Style): Promise<void> {
   if ((await read($, level)) === 0) return
   const name = await currentName($)
   if (name === undefined) return
   if (name !== null) {
-    const plain = unmarked(name, lv)
+    const plain = unmarked(name, st)
     if (plain !== name && (plain === '' || !(await rename($, plain)))) return
   }
   await update($, level, () => 0)
 }
 
-async function tick($: Engine, lv: readonly Level[]): Promise<void> {
+async function tick($: Engine, st: Style): Promise<void> {
   if (isBusy || inTurn) return
   const idle = (await $.clock.now()) - lastActivity
-  const n = lv.filter(l => idle >= l.ms).length
+  const n = st.levels.filter(l => idle >= l.ms).length
   if (n <= reached) return
   isBusy = true
   try {
-    if (await sleep($, lv, n)) reached = n
+    if (await sleep($, st, n)) reached = n
   } finally {
     isBusy = false
   }
@@ -209,7 +259,7 @@ async function active($: Engine): Promise<void> {
 // ---- hooks ---------------------------------------------------------------------------------
 
 export const register: Register = (on, options) => {
-  const lv = levels(options)
+  const st = style(options)
 
   on('session.start', async ($, e, next) => {
     const r = await next(e)
@@ -218,7 +268,7 @@ export const register: Register = (on, options) => {
     if (!e.isInteractive) return r
     await active($)
     inTurn = false
-    if (lv.length) timer = $.clock.every(CHECK_MS, () => { void tick($, lv) })
+    if (st.levels.length) timer = $.clock.every(CHECK_MS, () => { void tick($, st) })
     return r
   })
 
@@ -234,7 +284,7 @@ export const register: Register = (on, options) => {
     if (e.agentId) return r
     inTurn = false
     await active($)
-    await wake($, lv)
+    await wake($, st)
     return r
   })
 }
