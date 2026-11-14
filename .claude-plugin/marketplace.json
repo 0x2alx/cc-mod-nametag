@@ -1,0 +1,5 @@
+{
+  "name": "cc-mod-nametag",
+  "owner": { "name": "0x2alx" },
+  "plugins": [{ "name": "nametag", "source": "./" }]
+}
