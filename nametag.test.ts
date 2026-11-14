@@ -468,6 +468,65 @@ test('upgrade from 0.5: a name it marked loses the mark once', async ($, on) => 
   expect(w.renames).toEqual(['Builder'])
 })
 
+// What 0.5 left in the session's state (it survives the hot reload that brings in the new code).
+function state05(on: any, level: number) {
+  const state = new Map<string, unknown>([['level', level]])
+  on('state.get', (_: unknown, e: { key: string }) => ({ value: { value: state.get(e.key), version: state.has(e.key) ? 1 : 0 } }))
+  on('state.set', (_: unknown, e: { key: string; value: unknown }) => { state.set(e.key, e.value); return { value: { isSet: true, version: 2 } } })
+  return state
+}
+
+test('upgrade from 0.5: the mark comes off as soon as the new code loads', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: '💤💤 Builder' })
+  const state = state05(on, 2)
+  await start($)
+  await turn($, 't1')
+  expect(w.renames).toEqual(['Builder'])
+  expect(state.get('level')).toBe(null)
+})
+
+test('upgrade from 0.6.0 over a 0.5 mark: the stacked marks come off, the name is clean', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: '💤 💤💤 Builder' }) // 0.6.0 took "💤💤 Builder" for the person's name
+  preset(w, ID, '💤 💤💤 Builder', '💤💤 Builder')
+  const state = state05(on, 2)
+  await start($)
+  await turn($, 't1')
+  expect(state.get('level')).toBe(null)
+  expect(w.renames).toEqual(['Builder'])
+  expect(w.store.size).toBe(0)
+  await clock.advance(11 * MIN)
+  expect(w.renames).toEqual(['Builder', '💤 Builder'])
+})
+
+test('upgrade from 0.6.0 over a 0.5 mark, still idle: the next level builds from the clean name', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: '💤 💤 Builder' })
+  preset(w, ID, '💤 💤 Builder', '💤 Builder')
+  state05(on, 1)
+  await start($)
+  await clock.advance(11 * MIN) // the first tick due rebuilds the mark on the clean name
+  expect(w.renames).toEqual(['💤 Builder'])
+  await clock.advance(3 * HOUR)
+  expect(w.renames).toEqual(['💤 Builder', '💤💤 Builder'])
+  await turn($, 't1')
+  expect(w.renames).toEqual(['💤 Builder', '💤💤 Builder', 'Builder'])
+})
+
+test('upgrade from 0.5 when the first rename is refused: the next mark builds from the clean name', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: '💤💤 Builder' })
+  w.failRenames = 1
+  const state = state05(on, 2)
+  await start($)
+  await clock.advance(11 * MIN)
+  expect(w.renames).toEqual(['💤 Builder'])
+  expect(state.get('level')).toBe(null)
+  await turn($, 't1')
+  expect(w.renames).toEqual(['💤 Builder', 'Builder'])
+})
+
 test('records older than 30 days are dropped', async ($, on) => {
   mock.clock(on, { now: 40 * 24 * HOUR })
   const w = world(on, { name: 'Builder' })

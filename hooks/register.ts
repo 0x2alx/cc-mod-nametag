@@ -39,7 +39,7 @@ const oldLevel = atom({ plugin: 'nametag', key: 'level' } as const, null as numb
 let lastActivity = 0
 let inTurn = false
 let reached = 0 // levels applied (or found unneeded) during this idle spell
-let sleeping: Promise<void> | undefined // a tick's rename in flight; wake waits for it
+let sleeping: Promise<void> | undefined // a tick's (or the upgrade's) rename in flight; wake waits for it
 let scanAfter = 0
 let timer: { cancel(): void } | undefined
 
@@ -211,10 +211,12 @@ async function sleep($: Engine, st: Style, n: number): Promise<'done' | 'retry' 
     await $.store.delete(recordKey(id))
     return 'renamed'
   }
-  const base = mine ? mine.base : name
+  const legacy = !mine && ((await read($, oldLevel)) ?? 0) > 0
+  const base = legacy ? unmark05(name) : mine ? mine.base : name
   const want = marked(base, st, n)
   if (want !== name && !(await rename($, want))) return 'retry'
   await $.store.set(recordKey(id), { set: want, base, at: await $.clock.now() } satisfies Mark)
+  if (legacy) await update($, oldLevel, () => null)
   return 'done'
 }
 
@@ -231,16 +233,31 @@ async function wake($: Engine): Promise<void> {
   await $.store.delete(recordKey(id))
 }
 
-// 0.5 and earlier kept no record: a name they marked (💤 run, a space, the name) loses that mark
-// once, if their state says it was marked.
+// 0.5 and earlier kept no record and marked the front of the name: a run of 💤, a space, the name.
+export function unmark05(name: string): string {
+  const m = /^(?:💤)+\s+/u.exec(name)
+  return m && name.length > m[0].length ? name.slice(m[0].length) : name
+}
+
+// Upgrading from 0.5 (its state says the name carries its mark): the name loses that mark once.
+// Runs when the new code loads, so it is done before a restart drops the session's state. If 0.6.0
+// already marked the name on top, its record's base still carries the 0.5 mark: cleaned there, and
+// the next wake puts back the clean name. Tried again at each wake until it is done.
 async function upgrade($: Engine): Promise<void> {
   const level = await read($, oldLevel)
   if (level === null || level === undefined) return
   if (level > 0) {
-    const name = await currentName($)
-    if (name === undefined) return
-    const m = name === null ? null : /^(?:💤)+\s+/u.exec(name)
-    if (m && name !== null && name.length > m[0].length && !(await rename($, name.slice(m[0].length)))) return
+    const id = await $.session.id()
+    const mine = await record($, id)
+    if (mine) {
+      const base = unmark05(mine.base)
+      if (base !== mine.base) await $.store.set(recordKey(id), { ...mine, base } satisfies Mark)
+    } else {
+      const name = await currentName($)
+      if (name === undefined) return
+      const plain = name === null ? name : unmark05(name)
+      if (plain !== name && plain !== null && !(await rename($, plain))) return
+    }
   }
   await update($, oldLevel, () => null)
 }
@@ -280,6 +297,11 @@ export const register: Register = (on, options) => {
     await prune($).catch(err => $.ui.log(`nametag: ${err}`, { to: 'debug' }))
     await active($)
     inTurn = false
+    // not awaited: a rename waits for a running turn; ticks skip and wake waits while it runs
+    const up: Promise<void> = upgrade($)
+      .catch(err => { $.ui.log(`nametag: ${err}`, { to: 'debug' }) })
+      .finally(() => { if (sleeping === up) sleeping = undefined })
+    sleeping = up
     if (st.levels.length) {
       timer = $.clock.every(CHECK_MS, () => {
         tick($, st).catch(err => $.ui.log(`nametag: ${err}`, { to: 'debug' }))

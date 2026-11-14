@@ -1,6 +1,6 @@
 {
   "name": "nametag",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Marks an idle session's name in up to three steps (💤, 💤💤, 💤💤💤) and clears the mark at the next turn",
   "author": {
     "name": "0x2alx"
