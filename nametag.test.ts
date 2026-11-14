@@ -2,47 +2,66 @@ import { expect, mock, test } from 'claude-code/testing'
 
 const ID = 'aaaaaaaa-0000-4000-8000-000000000001'
 const CONFIG = '/u/.claude'
-const PATH = `${CONFIG}/projects/-work-demo/${ID}.jsonl`
 const PROJECTS = ['-other-project', '-work-demo']
 const MIN = 60 * 1000
 const HOUR = 60 * MIN
 
 // A fake world beneath the mod: one transcript, /rename appending a title row to it.
 function world(on: any, opts: { name?: string; size?: number; env?: Record<string, string>; path?: string } = {}) {
-  const path = opts.path ?? PATH
-  const w = { text: '{"type":"user","message":"hello"}\n', renames: [] as string[], greps: 0, reads: 0, blocked: false }
-  const title = (name: string) => { w.text += JSON.stringify({ type: 'custom-title', customTitle: name, sessionId: ID }) + '\n' }
+  const w = {
+    text: '{"type":"user","message":"hello"}\n', renames: [] as string[], greps: 0, reads: 0, lists: 0, attempts: 0,
+    blocked: false, failRenames: 0, logs: [] as string[], store: new Map<string, unknown>(), gate: undefined as Promise<void> | undefined, id: ID,
+    title: (name: string) => { w.text += JSON.stringify({ type: 'custom-title', customTitle: name, sessionId: w.id }) + '\n' },
+  }
+  const pathOf = () => opts.path ?? `${CONFIG}/projects/-work-demo/${w.id}.jsonl`
+  const title = w.title
   if (opts.name !== undefined) title(opts.name)
   mock.env(on, opts.env ?? { CLAUDE_CONFIG_DIR: CONFIG })
+  on('store.get', (_: unknown, e: { key: string }) => ({ value: w.store.get(e.key) }))
+  on('store.set', (_: unknown, e: { key: string; value: unknown }) => { w.store.set(e.key, JSON.parse(JSON.stringify(e.value))); return { value: undefined } })
+  on('store.delete', (_: unknown, e: { key: string }) => { w.store.delete(e.key); return { value: undefined } })
+  on('store.keys', () => ({ value: [...w.store.keys()] }))
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('turn.start', (_: unknown, e: { turnId: string }) => ({ turnId: e.turnId }))
   on('turn.complete', (_: unknown, e: { answer: string }) => ({ text: e.answer }))
-  on('session.id', () => ({ value: ID }))
+  on('ui.log', (_: unknown, e: { text: string }) => { w.logs.push(e.text); return { value: undefined } })
+  on('session.id', () => ({ value: w.id }))
   on('session.root', () => ({ value: '/work/demo' }))
   on('fs.stat', (_: unknown, e: { path: string }) => {
-    if (e.path !== path || w.blocked) throw new Error('ENOENT')
+    if (e.path !== pathOf() || w.blocked) throw new Error('ENOENT')
     return { value: { kind: 'file', size: opts.size ?? w.text.length, mtimeMs: 0, isLink: false } }
   })
   on('fs.read', (_: unknown, e: { path: string }) => {
-    if (e.path !== path) throw new Error('ENOENT')
+    if (e.path !== pathOf()) throw new Error('ENOENT')
     w.reads++
     return { value: w.text }
   })
-  on('fs.exists', (_: unknown, e: { path: string }) => ({ value: e.path === path }))
+  on('fs.exists', (_: unknown, e: { path: string }) => ({ value: e.path === pathOf() }))
   on('fs.list', (_: unknown, e: { path: string }) => {
+    w.lists++
     if (e.path !== `${CONFIG}/projects`) throw new Error('ENOENT')
-    return { value: [...PROJECTS, path.split('/').at(-2)].map(name => ({ name, kind: 'dir', size: 0, mtimeMs: 0, isLink: false })) }
+    return { value: [...PROJECTS, pathOf().split('/').at(-2)].map(name => ({ name, kind: 'dir', size: 0, mtimeMs: 0, isLink: false })) }
   })
   on('process.run', (_: unknown, e: { argv: readonly string[] }) => {
     w.greps++
     const hits = w.text.split('\n').filter(l => l.includes('"type":"custom-title"'))
     return { value: { exitCode: hits.length ? 0 : 1, stdout: hits.join('\n'), stderr: '' } }
   })
-  on('command.run', (_: unknown, e: { command: string; args: string }) => {
-    if (e.command === 'rename') { w.renames.push(e.args); title(e.args) }
+  on('command.run', async (_: unknown, e: { command: string; args: string }) => {
+    if (e.command === 'rename') {
+      w.attempts++
+      if (w.gate) await w.gate
+      if (w.failRenames > 0) { w.failRenames--; throw new Error('rename refused') }
+      w.renames.push(e.args); title(e.args)
+    }
     return { text: `Session renamed to: ${e.args}` }
   })
   return w
+}
+
+// A record as the mod keeps it while a session is marked.
+function preset(w: { store: Map<string, unknown> }, id: string, set: string, base: string, at = 1_000_000) {
+  w.store.set(`mark:${id}`, { set, base, at })
 }
 
 async function start($: any, isInteractive = true) {
@@ -170,14 +189,6 @@ test('a name that only starts with the emoji is not taken for a mark', async ($,
   expect(w.renames).toEqual(['💤 💤Builder', '💤Builder'])
 })
 
-test('wakes a name marked by an older version', async ($, on) => {
-  mock.clock(on, { now: 1_000_000 })
-  const w = world(on, { name: '💤💤💤 Builder' })
-  await start($)
-  await turn($, 't1')
-  expect(w.renames).toEqual(['Builder'])
-})
-
 test('uses HOME/.claude without CLAUDE_CONFIG_DIR', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on, { name: 'Builder', env: { HOME: '/u' } })
@@ -250,18 +261,218 @@ test('style: brackets alone', { options: { brackets: '()' } }, async ($, on) => 
   expect(w.renames).toEqual(['(💤) Builder', 'Builder'])
 })
 
-test('a new style still wakes a name marked the old way', { options: { position: 'end', separator: '-' } }, async ($, on) => {
-  mock.clock(on, { now: 1_000_000 })
-  const w = world(on, { name: '💤💤💤 Builder' })
-  await start($)
-  await turn($, 't1')
-  expect(w.renames).toEqual(['Builder'])
-})
-
 test('a name ending in an unmarked emoji is left alone', { options: { position: 'end' } }, async ($, on) => {
   mock.clock(on, { now: 1_000_000 })
   const w = world(on, { name: 'Builder 😑' })
   await start($)
   await turn($, 't1')
   expect(w.renames).toEqual([])
+})
+
+test('a refused rename is tried again on the next tick', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  w.failRenames = 1
+  await start($)
+  await clock.advance(11 * MIN)
+  expect(w.renames).toEqual(['💤 Builder'])
+  expect(w.attempts).toBe(2)
+})
+
+test('a prompt during a rename: the mark still comes off after the turn', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  let open = () => {}
+  w.gate = new Promise<void>(r => { open = r })
+  await start($)
+  await clock.advance(10 * MIN + 30 * 1000) // the tick's rename is now waiting
+  expect(w.attempts).toBe(1)
+  await $.turn.start({ text: 'hi', turnId: 't1' } as any)
+  const done = $.turn.complete({ answer: 'ok', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' } as any)
+  w.gate = undefined
+  open()
+  await done
+  expect(w.renames).toEqual(['💤 Builder', 'Builder'])
+  await clock.advance(11 * MIN) // the reset stands: the next idle spell marks again
+  expect(w.renames).toEqual(['💤 Builder', 'Builder', '💤 Builder'])
+})
+
+test('position end keeps a name that starts with the emoji', { options: { position: 'end' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: '💤 Notes' })
+  await start($)
+  await turn($, 't0') // first wake: an unmarked name read in any style would lose its 💤
+  w.renames.length = 0
+  w.title('💤 Notes') // the person names it again
+  await clock.advance(11 * MIN)
+  await turn($, 't1')
+  expect(w.renames).toEqual(['💤 Notes 💤', '💤 Notes'])
+})
+
+test('a name that is only the emoji', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: '💤' })
+  await start($)
+  await clock.advance(11 * MIN)
+  await turn($, 't1')
+  expect(w.renames).toEqual(['💤 💤', '💤'])
+})
+
+for (const sep of ['.*', '$', '\\', '(', '|']) {
+  test(`separator ${sep}`, { options: { separator: sep } }, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = world(on, { name: 'Builder' })
+    await start($)
+    await clock.advance(11 * MIN)
+    await turn($, 't1')
+    expect(w.renames).toEqual([`💤 ${sep} Builder`, 'Builder'])
+  })
+}
+
+for (const brackets of ['[]', '()', '{}', '<>']) {
+  test(`brackets ${brackets} at the end`, { options: { brackets, position: 'end' } }, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = world(on, { name: 'Builder' })
+    await start($)
+    await clock.advance(11 * MIN)
+    await turn($, 't1')
+    expect(w.renames).toEqual([`Builder ${brackets[0]}💤${brackets[1]}`, 'Builder'])
+  })
+}
+
+test('a ZWJ emoji name is not taken for a mark of its first part', { options: { level1_emoji: '👨' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: '👨‍👩‍👧 Family' })
+  await start($)
+  await turn($, 't0')
+  await clock.advance(11 * MIN)
+  await turn($, 't1')
+  expect(w.renames).toEqual(['👨 👨‍👩‍👧 Family', '👨‍👩‍👧 Family'])
+})
+
+test('a rename by the person while marked stands', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  await start($)
+  await clock.advance(11 * MIN)
+  w.title('New name')
+  await turn($, 't1')
+  expect(w.renames).toEqual(['💤 Builder'])
+})
+
+test('a double session.start leaves one timer', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  await start($)
+  await start($)
+  await clock.advance(11 * MIN)
+  expect(w.attempts).toBe(1)
+})
+
+test('a truncated last row and CRLF lines', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  w.text = w.text.replace(/\n/g, '\r\n') + '{"type":"custom-title","customTi'
+  await start($)
+  await clock.advance(11 * MIN)
+  expect(w.renames).toEqual(['💤 Builder'])
+})
+
+test('a transcript not found is searched for at most every 10 minutes', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder', path: `${CONFIG}/projects/-nowhere/x.jsonl` })
+  await start($)
+  await clock.advance(40 * MIN)
+  expect(w.renames).toEqual([])
+  expect(w.lists).toBeLessThanOrEqual(4)
+})
+
+test('the mark is rebuilt from the name under it when the style changes', { options: { brackets: '[]' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: '💤 - Builder' }) // set by this mod under another style
+  preset(w, ID, '💤 - Builder', 'Builder')
+  await start($)
+  await clock.advance(3 * HOUR + MIN)
+  await turn($, 't1')
+  expect(w.renames).toEqual(['[💤] Builder', '[💤💤] Builder', 'Builder']) // never "[💤] 💤 - Builder"
+})
+
+test('a mark set under another style comes off', { options: { position: 'end' } }, async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: '(💤💤) | Builder' })
+  preset(w, ID, '(💤💤) | Builder', 'Builder')
+  await start($)
+  await turn($, 't1')
+  expect(w.renames).toEqual(['Builder'])
+})
+
+test('a name this mod did not set is never parsed', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: '💤 Builder' })
+  await start($)
+  await turn($, 't1')
+  expect(w.renames).toEqual([])
+  await clock.advance(11 * MIN)
+  expect(w.renames).toEqual(['💤 💤 Builder'])
+  await turn($, 't2')
+  expect(w.renames).toEqual(['💤 💤 Builder', '💤 Builder'])
+})
+
+test('a headless turn clears a mark but never sets one', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: '💤 Builder' })
+  preset(w, ID, '💤 Builder', 'Builder')
+  await start($, false)
+  await turn($, 't1')
+  await clock.advance(30 * MIN)
+  expect(w.renames).toEqual(['Builder'])
+})
+
+test('switching sessions reads the new one', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  await start($)
+  await turn($, 't1')
+  w.id = 'bbbbbbbb-0000-4000-8000-000000000002'
+  w.title('💤 Other')
+  preset(w, w.id, '💤 Other', 'Other')
+  await turn($, 't2')
+  expect(w.renames).toEqual(['Other'])
+})
+
+test('a rename while marked counts as activity once noticed; the new name is marked after a fresh idle spell', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  await start($)
+  await clock.advance(11 * MIN)
+  w.title('New name') // the person renames while marked, without sending anything
+  await clock.advance(2 * HOUR + 50 * MIN) // level 2 is due: the mod notices the rename instead of marking
+  expect(w.renames).toEqual(['💤 Builder'])
+  await clock.advance(7 * MIN) // noticed at 3 h, so 3 h 08: not yet
+  expect(w.renames).toEqual(['💤 Builder'])
+  await clock.advance(3 * MIN) // 10 idle minutes after noticing
+  expect(w.renames).toEqual(['💤 Builder', '💤 New name'])
+  await turn($, 't1')
+  expect(w.renames.at(-1)).toBe('New name')
+})
+
+test('upgrade from 0.5: a name it marked loses the mark once', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: '💤💤💤 Builder' })
+  const state = new Map<string, unknown>([['level', 1]]) // what 0.5 left in the session's state
+  on('state.get', (_: unknown, e: { key: string }) => ({ value: { value: state.get(e.key), version: state.has(e.key) ? 1 : 0 } }))
+  on('state.set', (_: unknown, e: { key: string; value: unknown }) => { state.set(e.key, e.value); return { value: { isSet: true, version: 2 } } })
+  await start($)
+  await turn($, 't1')
+  await turn($, 't2')
+  expect(w.renames).toEqual(['Builder'])
+})
+
+test('records older than 30 days are dropped', async ($, on) => {
+  mock.clock(on, { now: 40 * 24 * HOUR })
+  const w = world(on, { name: 'Builder' })
+  preset(w, 'old', 'x', 'y', 1)
+  preset(w, 'new', 'x', 'y', 39 * 24 * HOUR)
+  await start($)
+  expect([...w.store.keys()]).toEqual(['mark:new'])
 })

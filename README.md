@@ -2,7 +2,7 @@
 
 A [Claude Code](https://claude.com/claude-code) mod that marks idle sessions, in up to three steps. When a session has had no prompt and no turn for 10 minutes, it puts `💤 ` in front of the session's name; after 3 hours the mark becomes `💤💤 `, after 12 hours `💤💤💤 `. When the next turn ends, it takes the mark off again. The delays and the emoji of each step are options.
 
-This helps when you run several named sessions, for example in tmux or through Remote Control. You can see at a glance which ones are waiting on you and which have been quiet for a while.
+This helps when you run several named sessions, for example in tmux or through Remote Control. You can see at a glance which ones have been quiet, and for how long.
 
 ```
 Builder  →  10 min  →  💤 Builder  →  3 h  →  💤💤 Builder  →  12 h  →  💤💤💤 Builder
@@ -29,7 +29,17 @@ To try it from a local copy without installing, run `claude --plugin-dir /path/t
 
 ## Options
 
-Set them in `/config`, or under `pluginConfigs` in your settings. Each level has a delay and an emoji:
+Set them in `/config`, or in your user settings (`~/.claude/settings.json`), under the plugin's id:
+
+```json
+"pluginConfigs": {
+  "nametag@cc-mod-nametag": {
+    "options": { "level1_minutes": 15, "position": "end", "brackets": "[]" }
+  }
+}
+```
+
+Each level has a delay and an emoji:
 
 | Option | Default | What it does |
 | --- | --- | --- |
@@ -60,15 +70,15 @@ For example, at level 2:
 | `brackets: []` | `[💤💤] Builder` |
 | `position: end`, `separator: \|`, `brackets: ()` | `Builder \| (💤💤)` |
 
-The mod checks once a minute, so each step lands within a minute of its delay. If the levels' minutes are out of order, the mod sorts them by minutes.
+The mod checks once a minute, so each step lands within a minute of its delay. If the levels' minutes are out of order, the mod sorts the levels by minutes, and each emoji moves with its minutes.
 
 ## What it does, exactly
 
-- **Only some sessions.** It acts only in interactive sessions. It skips `claude -p`, the SDK and other headless runs, and it acts only on sessions that have a name, meaning `/rename` was used at least once or the session was started with `--name`. It leaves unnamed sessions alone.
-- **What counts as activity.** Your prompts, and every turn of the main conversation, including turns started by background tasks or other tools. Subagent turns don't count.
+- **Only some sessions.** It marks only interactive sessions, never `claude -p`, the SDK or other headless runs, though a headless turn on a marked session (for example `claude -p --resume`) still takes the mark off. It acts only on sessions that have a name, meaning `/rename` was used at least once or the session was started with `--name`. It leaves unnamed sessions alone.
+- **What counts as activity.** Your prompts, and every turn of the main conversation, including turns started by background tasks or other tools. Subagent turns don't count. A turn that is still running, for example one waiting for you to approve a tool, is never marked.
 - **When the mark comes off.** At the end of the next turn, not when you press Enter. Claude Code doesn't let a rename run while a turn holds the session, so the name keeps the mark while that turn runs.
-- **Renaming during a sleep.** If you rename a session while it is marked, your new name stands, and the mod doesn't put the old one back.
-- **What counts as a mark.** A run of the configured emojis (or `💤`, the mark of earlier versions), in the configured brackets, joined to the name by a space or by the separator, at the configured end of the name. A mark in the default style (`💤💤 Builder`) is always recognised too, so changing the style still wakes names marked the old way. So `💤💤💤 Builder` from an older version wakes cleanly, while a name like `💤Builder`, with no space after the emoji, is left as you wrote it. Avoid an emoji that your own names start (or, with `position: end`, end) with, next to a space.
+- **Renaming during a sleep.** If you rename a session while it is marked, your new name stands and the mod doesn't put the old one back. The mod notices the rename when the next level is due (it doesn't read the transcript every minute), counts it as activity, and marks your new name after a fresh idle spell.
+- **The name it builds from.** The mark is always built from the name you gave the session, with `/rename` or `--name`. The mod never tries to read a mark back out of a name. The transcript doesn't record who set a name, so while a session is marked the mod keeps a small record in its own store: the name it set, and your name under it. If the session's name is still that exact name, your name is the one in the record; any other name is yours. So changing `position`, `separator`, `brackets` or the emojis takes effect at the next step, built fresh from your name, and a name you happen to start with `💤` stays as you wrote it. The record is deleted when the mark comes off; records of sessions that ended while marked and never came back are dropped after 30 days.
 - **Named at launch.** `claude --name <name>` (or `-n`) counts as a name, the same as `/rename`. A name given only to `--remote-control <name>` doesn't reach the transcript, so the mod skips that session; add `--name` too, or `/rename` it once.
 
 ## Cost
@@ -80,7 +90,11 @@ Each rename goes through `/rename`, which adds a short "Session renamed to: …"
 - **It depends on an undocumented file format.** Claude Code has no API that returns a session's name. The mod reads the name from the session's transcript file, using the newest `{"type":"custom-title","customTitle":…}` row. That format isn't documented and may change in a future Claude Code release. If it does, the mod stops renaming. It won't rename to anything wrong: when it can't read the name, it does nothing.
 - **Finding the transcript.** Transcripts live at `<config>/projects/<project folder>/<session id>.jsonl`, where `<config>` is `$CLAUDE_CONFIG_DIR` or `~/.claude`. The session id is unique, so the mod finds the file by that name. It looks first in the folder Claude Code names after the project, then in every project folder, which covers long project paths whose folder name Claude Code shortens. It remembers the path for the rest of the session. (Hook events such as `Stop` carry the exact path, but Claude Code's built-in security plugin doesn't pass those events to installed mods.)
 - **Large transcripts.** Mods can read files of up to 4 MiB directly. For bigger transcripts the mod runs `grep` (Linux, macOS), falling back to `findstr` (Windows). Windows is untested.
-- **Mod API.** It uses the Claude Code mods API (hooks modules), tested on Claude Code 2.1.325.
+- **Mod API.** It needs a Claude Code version with the mods API (hooks modules). It is tested on Claude Code 2.1.325.
+
+## Uninstall
+
+`/plugin uninstall nametag`, or `claude plugin uninstall nametag`. A session that is marked at that moment keeps its mark: `/rename` it once to clear it.
 
 ## Development
 
@@ -90,6 +104,8 @@ claude plugin test .
 ```
 
 The tests in `nametag.test.ts` run against a fake transcript and a mocked clock.
+
+`tsconfig.json` points at the mods API types in `.claude-plugin/types/`. Claude Code writes them there when it loads the mod (for example with `claude --plugin-dir .`), so they aren't in the repo. Until then, only your editor's type checking misses them; `validate` and `test` work without them.
 
 ## License
 
