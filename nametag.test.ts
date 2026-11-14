@@ -11,6 +11,7 @@ function world(on: any, opts: { name?: string; size?: number; env?: Record<strin
   const w = {
     text: '{"type":"user","message":"hello"}\n', renames: [] as string[], greps: 0, reads: 0, lists: 0, attempts: 0,
     blocked: false, failRenames: 0, logs: [] as string[], store: new Map<string, unknown>(), gate: undefined as Promise<void> | undefined, id: ID,
+    agents: [] as { id: string; status: string }[], results: {} as Record<string, unknown>,
     title: (name: string) => { w.text += JSON.stringify({ type: 'custom-title', customTitle: name, sessionId: w.id }) + '\n' },
   }
   const pathOf = () => opts.path ?? `${CONFIG}/projects/-work-demo/${w.id}.jsonl`
@@ -22,6 +23,9 @@ function world(on: any, opts: { name?: string; size?: number; env?: Record<strin
   on('store.delete', (_: unknown, e: { key: string }) => { w.store.delete(e.key); return { value: undefined } })
   on('store.keys', () => ({ value: [...w.store.keys()] }))
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
+  on('agent.list', () => ({ value: w.agents.map(a => ({ description: 'x', type: 'general-purpose', ...a })) }))
+  on('tool.call', (_: unknown, e: { tool: string }) => ({ result: w.results[e.tool] ?? {} }))
+  on('prompt.submit', (_: unknown, e: { text: string }) => ({ text: e.text }))
   on('turn.start', (_: unknown, e: { turnId: string }) => ({ turnId: e.turnId }))
   on('turn.complete', (_: unknown, e: { answer: string }) => ({ text: e.answer }))
   on('ui.log', (_: unknown, e: { text: string }) => { w.logs.push(e.text); return { value: undefined } })
@@ -548,6 +552,93 @@ test('a session renamed while it was closed keeps that name at start', async ($,
   await clock.advance(MIN)
   expect(w.renames).toEqual([])
   expect(w.store.size).toBe(0)
+})
+
+// ---- work in the background ----
+
+async function background($: any, w: any, tool: string, result: unknown, input: Record<string, unknown> = {}) {
+  w.results[tool] = result
+  await $.tool.call({ tool, ...input })
+}
+
+async function notice($: any, text: string) {
+  await $.prompt.submit({ text, origin: { kind: 'task-notification' } } as any)
+}
+
+test('a background command keeps the session awake until its end is noticed', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  await start($)
+  await background($, w, 'Bash', { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'b1x9' }, { command: 'make', run_in_background: true })
+  await clock.advance(2 * HOUR)
+  expect(w.renames).toEqual([])
+  await notice($, '<task-notification><task-id>b1x9</task-id><status>completed</status></task-notification>')
+  await clock.advance(9 * MIN)
+  expect(w.renames).toEqual([])
+  await clock.advance(2 * MIN)
+  expect(w.renames).toEqual(['💤 Builder'])
+})
+
+test('a notice for another task leaves the command counted', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  await start($)
+  await background($, w, 'Bash', { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'b1x9' }, { command: 'make', run_in_background: true })
+  await notice($, '<task-id>zz77</task-id>')
+  await clock.advance(HOUR)
+  expect(w.renames).toEqual([])
+})
+
+test('a stopped command stops counting', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  await start($)
+  await background($, w, 'Bash', { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'b1x9' }, { command: 'make', run_in_background: true })
+  await background($, w, 'TaskStop', { message: 'stopped', task_id: 'b1x9', task_type: 'local_bash' }, { task_id: 'b1x9' })
+  await clock.advance(11 * MIN)
+  expect(w.renames).toEqual(['💤 Builder'])
+})
+
+test('a command whose end is never noticed stops counting after a day', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  await start($)
+  await background($, w, 'Bash', { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'b1x9' }, { command: 'make', run_in_background: true })
+  await clock.advance(24 * HOUR)
+  expect(w.renames).toEqual([])
+  await clock.advance(12 * MIN)
+  expect(w.renames).toEqual(['💤 Builder'])
+})
+
+test('a background workflow counts; a Monitor and a command ended with the reply do not', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  await start($)
+  await background($, w, 'Monitor', { taskId: 'm1', timeoutMs: 0, persistent: true }, { command: 'tail -f log' })
+  await background($, w, 'Bash', { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'b2', backgroundEndsWithFinalResponse: true }, { command: 'x', run_in_background: true })
+  await clock.advance(11 * MIN)
+  expect(w.renames).toEqual(['💤 Builder'])
+  await turn($, 't1')
+  await background($, w, 'Workflow', { status: 'async_launched', taskId: 'wf1' }, { script: 'x' })
+  await clock.advance(HOUR)
+  expect(w.renames).toEqual(['💤 Builder', 'Builder'])
+  await notice($, 'workflow wf1 completed')
+  await clock.advance(11 * MIN)
+  expect(w.renames).toEqual(['💤 Builder', 'Builder', '💤 Builder'])
+})
+
+test('a running agent keeps the session awake; an idle teammate does not', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  w.agents = [{ id: 'a1', status: 'running' }, { id: 'a2', status: 'idle' }]
+  await start($)
+  await clock.advance(HOUR)
+  expect(w.renames).toEqual([])
+  w.agents = [{ id: 'a1', status: 'completed' }, { id: 'a2', status: 'idle' }]
+  await clock.advance(9 * MIN)
+  expect(w.renames).toEqual([])
+  await clock.advance(2 * MIN)
+  expect(w.renames).toEqual(['💤 Builder'])
 })
 
 test('records older than 30 days are dropped', async ($, on) => {

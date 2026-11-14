@@ -31,7 +31,12 @@ const SCAN_RETRY_MS = 10 * 60 * 1000 // a transcript not found: search every pro
 
 const RECORD_DAYS = 30 // records of sessions never woken again are dropped after this
 
+const WORK_MAX_MS = 24 * 60 * 60 * 1000 // a background task whose end was never seen stops counting after this
+const AGENT_BUSY = new Set(['pending', 'running', 'waiting'])
+
 const transcript = atom({ plugin: 'nametag', key: 'transcript' } as const, null)
+// Background commands and workflows still running: task id -> when it started.
+const work = atom({ plugin: 'nametag', key: 'work' } as const, null as Record<string, number> | null)
 // 0.5 and earlier: how many levels the name carried. Read once, to wake a name marked before the
 // upgrade; remove in a later version.
 const oldLevel = atom({ plugin: 'nametag', key: 'level' } as const, null as number | null)
@@ -266,8 +271,50 @@ async function upgrade($: Engine): Promise<void> {
   await update($, oldLevel, () => null)
 }
 
+// ---- work in the background ----------------------------------------------------------------
+
+// A command, workflow or agent working in the background keeps the session from being idle. Agents
+// (subagents, teammates) are in $.agent.list(). Background commands and workflows are not: they are
+// noted when a tool call puts one in the background and dropped when the notice of its end arrives
+// (its task id appears in that notice), when TaskStop stops it, or after WORK_MAX_MS. A Monitor is
+// a watch, not work, and doesn't count.
+export function startedTask(tool: string, result: unknown): string | null {
+  if (!result || typeof result !== 'object') return null
+  const r = result as Record<string, unknown>
+  if (tool === 'Bash' && typeof r.backgroundTaskId === 'string' && r.backgroundEndsWithFinalResponse !== true) return r.backgroundTaskId
+  if (tool === 'Workflow' && typeof r.taskId === 'string' && (r.status === 'async_launched' || r.status === 'remote_launched')) return r.taskId
+  return null
+}
+
+async function track($: Engine, id: string): Promise<void> {
+  const now = await $.clock.now()
+  await update($, work, w => ({ ...(w ?? {}), [id]: now }))
+}
+
+async function untrack($: Engine, ended: (id: string) => boolean): Promise<void> {
+  const w = await read($, work)
+  if (!w) return
+  const left = Object.fromEntries(Object.entries(w).filter(([id]) => !ended(id)))
+  if (Object.keys(left).length !== Object.keys(w).length) await update($, work, () => left)
+}
+
+async function busy($: Engine): Promise<boolean> {
+  const now = await $.clock.now()
+  const w = (await read($, work)) ?? {}
+  const stale = Object.entries(w).filter(([, at]) => now - at > WORK_MAX_MS).map(([id]) => id)
+  if (stale.length) await untrack($, id => stale.includes(id))
+  if (Object.keys(w).length > stale.length) return true
+  try {
+    return (await $.agent.list()).some(a => AGENT_BUSY.has(a.status))
+  } catch {
+    return false
+  }
+}
+
 async function tick($: Engine, st: Style): Promise<void> {
   if (sleeping || inTurn) return
+  // idle time counts from the moment nothing works any more
+  if (await busy($)) return active($)
   const since = lastActivity
   const idle = (await $.clock.now()) - since
   const n = st.levels.filter(l => idle >= l.ms).length
@@ -319,11 +366,31 @@ export const register: Register = (on, options) => {
     return r
   })
 
-  // A prompt from another plugin starts a turn of its own, which counts below.
+  // A prompt from another plugin starts a turn of its own, which counts below. A background task's
+  // notice of its end names its task id.
   on('prompt.submit', async ($, e, next) => {
     if (e.origin?.kind !== 'plugin') await active($)
+    if (e.origin?.kind === 'task-notification') await untrack($, id => e.text.includes(id))
     return next(e)
   }).catch(($, e, next) => next(e))
+
+  // Work put in the background, in any agent's loop.
+  on('tool.call', async ($, e, next) => {
+    const r = await next(e)
+    try {
+      if (!('deny' in r && r.deny !== undefined) && !r.isError) {
+        const id = startedTask(e.tool, r.result)
+        if (id) await track($, id)
+        if (e.tool === 'TaskStop') {
+          const stopped = (r.result as { task_id?: unknown } | undefined)?.task_id
+          if (typeof stopped === 'string') await untrack($, id => id === stopped)
+        }
+      }
+    } catch (err) {
+      $.ui.log(`nametag: ${err}`, { to: 'debug' })
+    }
+    return r
+  })
   on('turn.start', async ($, e, next) => {
     if (!e.agentId) { inTurn = true; await active($) }
     return next(e)
