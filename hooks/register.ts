@@ -94,16 +94,17 @@ async function transcriptPath($: Engine): Promise<string | null> {
   return `${config.replace(/[\\/]+$/, '')}/projects/${projectFolder(await $.session.root())}/${id}.jsonl`
 }
 
-// The session's name as /rename last set it, or null (never named, or the transcript unreadable).
-async function currentName($: Engine): Promise<string | null> {
+// The session's name as /rename last set it: a string, null when the session was never named, or
+// undefined when the transcript can't be found or read (try again later).
+async function currentName($: Engine): Promise<string | null | undefined> {
   const path = await transcriptPath($)
-  if (!path) return null
+  if (!path) return undefined
   try {
     const st = await $.fs.stat(path)
-    if (st.kind !== 'file') return null
+    if (st.kind !== 'file') return undefined
     if (st.size <= FS_READ_MAX) return newestTitle(await $.fs.read(path))
   } catch {
-    return null
+    return undefined
   }
   // Too big for $.fs.read: let the system's search tool pick the rows.
   for (const argv of [['grep', '-a', '-F', TITLE_ROW, path], ['findstr', '/L', '/C:custom-title', path]]) {
@@ -112,7 +113,7 @@ async function currentName($: Engine): Promise<string | null> {
       if (r.exitCode === 0 || r.exitCode === 1) return newestTitle(r.stdout)
     } catch {}
   }
-  return null
+  return undefined
 }
 
 // ---- renaming ------------------------------------------------------------------------------
@@ -127,16 +128,20 @@ async function rename($: Engine, name: string): Promise<boolean> {
   }
 }
 
-async function sleep($: Engine, prefix: string): Promise<void> {
+// Puts the prefix on. Returns false when the name couldn't be read, so the next tick tries again.
+async function sleep($: Engine, prefix: string): Promise<boolean> {
   const name = await currentName($)
-  if (name === null || name.trim() === '') return
-  if (isMarked(name, prefix)) { await update($, mark, () => 'asleep'); return }
+  if (name === undefined) return false
+  if (name === null || name.trim() === '') return true
+  if (isMarked(name, prefix)) { await update($, mark, () => 'asleep'); return true }
   if (await rename($, prefix + name)) await update($, mark, () => 'asleep')
+  return true
 }
 
 async function wake($: Engine, prefix: string): Promise<void> {
   if ((await read($, mark)) === 'awake') return
   const name = await currentName($)
+  if (name === undefined) return
   if (name !== null && isMarked(name, prefix)) {
     const plain = unmarked(name, prefix)
     if (plain === '' || !(await rename($, plain))) return
@@ -149,8 +154,7 @@ async function tick($: Engine, idleMs: number, prefix: string): Promise<void> {
   if ((await $.clock.now()) - lastActivity < idleMs) return
   isBusy = true
   try {
-    isSleptThisIdle = true
-    await sleep($, prefix)
+    isSleptThisIdle = await sleep($, prefix)
   } finally {
     isBusy = false
   }
@@ -188,6 +192,8 @@ export const register: Register = (on, options) => {
   on('classic.SessionStart', async ($, e, next) => { await remember($, e.transcript_path); return next(e) })
     .catch(($, e, next) => next(e))
   on('classic.UserPromptSubmit', async ($, e, next) => { await remember($, e.transcript_path); return next(e) })
+    .catch(($, e, next) => next(e))
+  on('classic.Stop', async ($, e, next) => { await remember($, e.transcript_path); return next(e) })
     .catch(($, e, next) => next(e))
 
   on('prompt.submit', async ($, e, next) => { await active($); return next(e) })

@@ -15,6 +15,7 @@ function world(on: any, opts: { name?: string; size?: number; env?: Record<strin
   on('turn.start', (_: unknown, e: { turnId: string }) => ({ turnId: e.turnId }))
   on('turn.complete', (_: unknown, e: { answer: string }) => ({ text: e.answer }))
   on('classic.UserPromptSubmit', () => ({}))
+  on('classic.Stop', () => ({}))
   on('session.id', () => ({ value: ID }))
   on('session.root', () => ({ value: '/work/demo' }))
   on('fs.stat', (_: unknown, e: { path: string }) => {
@@ -135,6 +136,18 @@ test('a transcript it cannot find leaves the name alone', async ($, on) => {
   await start($)
   await clock.advance(11 * MIN)
   expect(w.renames).toEqual([])
+})
+
+test('the path reported by a Stop event is used', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder', env: {} })
+  await start($)
+  await $.classic.Stop({ stop_hook_active: false } as any)
+  await clock.advance(11 * MIN)
+  expect(w.renames).toEqual([])
+  await $.classic.Stop({ stop_hook_active: false, transcript_path: PATH } as any)
+  await clock.advance(11 * MIN)
+  expect(w.renames).toEqual(['💤💤💤 Builder'])
 })
 
 test('a subagent turn does not wake the session', async ($, on) => {
