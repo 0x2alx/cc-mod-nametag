@@ -6,9 +6,9 @@ import type { Mark } from '../types'
 // nametag: marks an idle session's name in up to three steps. Each level has a delay and an
 // emoji: after level 1's delay with no prompt and no turn the name becomes "💤 name", after level
 // 2's "💤💤 name", after level 3's "💤💤💤 name" (via /rename). Options put the mark after the
-// name, join it with a separator, or wrap it in brackets. At the end of the next turn the mark
-// comes off. Interactive sessions only, and only sessions that have a name (/rename was used at
-// least once, or the session was started with --name).
+// name, join it with a separator, or wrap it in brackets. At the end of the next turn, or when the
+// session starts again, the mark comes off. Interactive sessions only, and only sessions that have
+// a name (/rename was used at least once, or the session was started with --name).
 //
 // The mark is always built from the name the person gave the session, never parsed out of a name.
 // The transcript doesn't say who set a name, so the mod keeps a record per session in its store:
@@ -224,6 +224,10 @@ async function sleep($: Engine, st: Style, n: number): Promise<'done' | 'retry' 
 // (by /rename) is the person's new name and stays.
 async function wake($: Engine): Promise<void> {
   await sleeping
+  return unmark($)
+}
+
+async function unmark($: Engine): Promise<void> {
   const id = await $.session.id()
   const mine = await record($, id)
   if (!mine) return upgrade($)
@@ -297,8 +301,13 @@ export const register: Register = (on, options) => {
     await prune($).catch(err => $.ui.log(`nametag: ${err}`, { to: 'debug' }))
     await active($)
     inTurn = false
-    // not awaited: a rename waits for a running turn; ticks skip and wake waits while it runs
-    const up: Promise<void> = upgrade($)
+    // A session that starts is in use: a mark it ended with (restart, resume, reload) comes off
+    // now, after the upgrade from 0.5 if one is due. Not awaited: a rename waits for a running
+    // turn; ticks skip and wake waits while it runs.
+    const up: Promise<void> = (async () => {
+      await upgrade($)
+      await unmark($)
+    })()
       .catch(err => { $.ui.log(`nametag: ${err}`, { to: 'debug' }) })
       .finally(() => { if (sleeping === up) sleeping = undefined })
     sleeping = up

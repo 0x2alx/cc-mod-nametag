@@ -394,7 +394,7 @@ test('the mark is rebuilt from the name under it when the style changes', { opti
   await start($)
   await clock.advance(3 * HOUR + MIN)
   await turn($, 't1')
-  expect(w.renames).toEqual(['[💤] Builder', '[💤💤] Builder', 'Builder']) // never "[💤] 💤 - Builder"
+  expect(w.renames).toEqual(['Builder', '[💤] Builder', '[💤💤] Builder', 'Builder']) // never "[💤] 💤 - Builder"
 })
 
 test('a mark set under another style comes off', { options: { position: 'end' } }, async ($, on) => {
@@ -500,24 +500,24 @@ test('upgrade from 0.6.0 over a 0.5 mark: the stacked marks come off, the name i
   expect(w.renames).toEqual(['Builder', '💤 Builder'])
 })
 
-test('upgrade from 0.6.0 over a 0.5 mark, still idle: the next level builds from the clean name', async ($, on) => {
+test('upgrade from 0.6.0 over a 0.5 mark: clean at load, then marked from the clean name', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on, { name: '💤 💤 Builder' })
   preset(w, ID, '💤 💤 Builder', '💤 Builder')
   state05(on, 1)
   await start($)
-  await clock.advance(11 * MIN) // the first tick due rebuilds the mark on the clean name
-  expect(w.renames).toEqual(['💤 Builder'])
-  await clock.advance(3 * HOUR)
-  expect(w.renames).toEqual(['💤 Builder', '💤💤 Builder'])
+  await clock.advance(MIN)
+  expect(w.renames).toEqual(['Builder'])
+  await clock.advance(10 * MIN)
+  expect(w.renames).toEqual(['Builder', '💤 Builder'])
   await turn($, 't1')
-  expect(w.renames).toEqual(['💤 Builder', '💤💤 Builder', 'Builder'])
+  expect(w.renames).toEqual(['Builder', '💤 Builder', 'Builder'])
 })
 
-test('upgrade from 0.5 when the first rename is refused: the next mark builds from the clean name', async ($, on) => {
+test('upgrade from 0.5 when renames are refused: the next mark still builds from the clean name', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on, { name: '💤💤 Builder' })
-  w.failRenames = 1
+  w.failRenames = 2 // the upgrade at load and its retry in the start's wake
   const state = state05(on, 2)
   await start($)
   await clock.advance(11 * MIN)
@@ -525,6 +525,29 @@ test('upgrade from 0.5 when the first rename is refused: the next mark builds fr
   expect(state.get('level')).toBe(null)
   await turn($, 't1')
   expect(w.renames).toEqual(['💤 Builder', 'Builder'])
+})
+
+test('a session that starts marked (restart, resume) is woken at once, without a turn', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: '💤💤 Builder' })
+  preset(w, ID, '💤💤 Builder', 'Builder')
+  await start($)
+  await clock.advance(MIN)
+  expect(w.renames).toEqual(['Builder'])
+  expect(w.store.size).toBe(0)
+  await turn($, 't1')
+  expect(w.renames).toEqual(['Builder'])
+})
+
+test('a session renamed while it was closed keeps that name at start', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: '💤 Builder' })
+  preset(w, ID, '💤 Builder', 'Builder')
+  w.title('Fresh name') // e.g. resumed with --name
+  await start($)
+  await clock.advance(MIN)
+  expect(w.renames).toEqual([])
+  expect(w.store.size).toBe(0)
 })
 
 test('records older than 30 days are dropped', async ($, on) => {
