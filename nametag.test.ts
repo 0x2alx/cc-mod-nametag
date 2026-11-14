@@ -3,10 +3,12 @@ import { expect, mock, test } from 'claude-code/testing'
 const ID = 'aaaaaaaa-0000-4000-8000-000000000001'
 const CONFIG = '/u/.claude'
 const PATH = `${CONFIG}/projects/-work-demo/${ID}.jsonl`
+const PROJECTS = ['-other-project', '-work-demo']
 const MIN = 60 * 1000
 
 // A fake world beneath the mod: one transcript, /rename appending a title row to it.
-function world(on: any, opts: { name?: string; size?: number; env?: Record<string, string> } = {}) {
+function world(on: any, opts: { name?: string; size?: number; env?: Record<string, string>; path?: string } = {}) {
+  const path = opts.path ?? PATH
   const w = { text: '{"type":"user","message":"hello"}\n', renames: [] as string[], greps: 0, reads: 0 }
   const title = (name: string) => { w.text += JSON.stringify({ type: 'custom-title', customTitle: name, sessionId: ID }) + '\n' }
   if (opts.name !== undefined) title(opts.name)
@@ -14,18 +16,21 @@ function world(on: any, opts: { name?: string; size?: number; env?: Record<strin
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('turn.start', (_: unknown, e: { turnId: string }) => ({ turnId: e.turnId }))
   on('turn.complete', (_: unknown, e: { answer: string }) => ({ text: e.answer }))
-  on('classic.UserPromptSubmit', () => ({}))
-  on('classic.Stop', () => ({}))
   on('session.id', () => ({ value: ID }))
   on('session.root', () => ({ value: '/work/demo' }))
   on('fs.stat', (_: unknown, e: { path: string }) => {
-    if (e.path !== PATH) throw new Error('ENOENT')
+    if (e.path !== path) throw new Error('ENOENT')
     return { value: { kind: 'file', size: opts.size ?? w.text.length, mtimeMs: 0, isLink: false } }
   })
   on('fs.read', (_: unknown, e: { path: string }) => {
-    if (e.path !== PATH) throw new Error('ENOENT')
+    if (e.path !== path) throw new Error('ENOENT')
     w.reads++
     return { value: w.text }
+  })
+  on('fs.exists', (_: unknown, e: { path: string }) => ({ value: e.path === path }))
+  on('fs.list', (_: unknown, e: { path: string }) => {
+    if (e.path !== `${CONFIG}/projects`) throw new Error('ENOENT')
+    return { value: [...PROJECTS, path.split('/').at(-2)].map(name => ({ name, kind: 'dir', size: 0, mtimeMs: 0, isLink: false })) }
   })
   on('process.run', (_: unknown, e: { argv: readonly string[] }) => {
     w.greps++
@@ -113,16 +118,15 @@ test('options: idle minutes and prefix', { options: { idle_minutes: 2, prefix: '
   expect(w.renames).toEqual(['[idle] Builder', 'Builder'])
 })
 
-test('wakes a name marked by an older prefix, and the path comes from the engine', async ($, on) => {
+test('wakes a name marked by an older prefix', async ($, on) => {
   mock.clock(on, { now: 1_000_000 })
-  const w = world(on, { name: '💤 Builder', env: {} }) // no config dir in env: the reported path is used
+  const w = world(on, { name: '💤 Builder' })
   await start($)
-  await $.classic.UserPromptSubmit({ prompt: 'hi', transcript_path: PATH } as any)
   await turn($, 't1')
   expect(w.renames).toEqual(['Builder'])
 })
 
-test('falls back to HOME/.claude when nothing else is known', async ($, on) => {
+test('uses HOME/.claude without CLAUDE_CONFIG_DIR', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on, { name: 'Builder', env: { HOME: '/u' } })
   await start($)
@@ -138,14 +142,10 @@ test('a transcript it cannot find leaves the name alone', async ($, on) => {
   expect(w.renames).toEqual([])
 })
 
-test('the path reported by a Stop event is used', async ($, on) => {
+test('finds the transcript in a shortened project folder by its session id', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
-  const w = world(on, { name: 'Builder', env: {} })
+  const w = world(on, { name: 'Builder', path: `${CONFIG}/projects/-work-de-1a2b3c/${ID}.jsonl` })
   await start($)
-  await $.classic.Stop({ stop_hook_active: false } as any)
-  await clock.advance(11 * MIN)
-  expect(w.renames).toEqual([])
-  await $.classic.Stop({ stop_hook_active: false, transcript_path: PATH } as any)
   await clock.advance(11 * MIN)
   expect(w.renames).toEqual(['💤💤💤 Builder'])
 })

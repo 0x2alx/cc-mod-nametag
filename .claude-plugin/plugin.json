@@ -1,6 +1,6 @@
 {
   "name": "nametag",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Marks a session's name with 💤 after a quiet spell and clears the mark at the next turn",
   "author": { "name": "0x2alx" },
   "homepage": "https://github.com/0x2alx/cc-mod-nametag",

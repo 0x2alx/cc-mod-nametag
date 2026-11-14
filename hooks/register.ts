@@ -79,19 +79,43 @@ export function projectFolder(dir: string): string {
   return dir.replace(/[^a-zA-Z0-9]/g, '-')
 }
 
-// The transcript of this session: the path the engine last reported when it belongs to this session,
-// else <config dir>/projects/<project folder>/<session id>.jsonl.
+// Claude Code's config folder: $CLAUDE_CONFIG_DIR, else ~/.claude.
+async function configDir($: Engine): Promise<string | null> {
+  const config = await $.env.get('CLAUDE_CONFIG_DIR')
+  if (config) return config.replace(/[\\/]+$/, '')
+  const home = (await $.env.get('HOME')) || (await $.env.get('USERPROFILE'))
+  return home ? `${home.replace(/[\\/]+$/, '')}/.claude` : null
+}
+
+// This session's transcript, <config>/projects/<project folder>/<session id>.jsonl. The session id
+// is unique, so the file is found by its name: first in the folder Claude Code names after the
+// project root, else in any project folder (long paths get a shortened folder name). The path
+// found is kept for the session.
+//
+// Hook events that carry transcript_path (classic.Stop and the like) would be simpler, but Claude
+// Code's built-in security plugin passes those events on past user-installed mods.
 async function transcriptPath($: Engine): Promise<string | null> {
   const id = await $.session.id()
   const known = await read($, transcript)
   if (known && known.replace(/\\/g, '/').endsWith(`/${id}.jsonl`)) return known
-  let config = await $.env.get('CLAUDE_CONFIG_DIR')
-  if (!config) {
-    const home = (await $.env.get('HOME')) || (await $.env.get('USERPROFILE'))
-    if (!home) return null
-    config = `${home}/.claude`
+  const config = await configDir($)
+  if (!config) return null
+  const projects = `${config}/projects`
+  const file = `${id}.jsonl`
+  const guess = `${projects}/${projectFolder(await $.session.root())}/${file}`
+  let found: string | null = null
+  if (await $.fs.exists(guess)) found = guess
+  else {
+    try {
+      for (const dir of await $.fs.list(projects)) {
+        if (dir.kind !== 'dir') continue
+        const candidate = `${projects}/${dir.name}/${file}`
+        if (await $.fs.exists(candidate)) { found = candidate; break }
+      }
+    } catch {}
   }
-  return `${config.replace(/[\\/]+$/, '')}/projects/${projectFolder(await $.session.root())}/${id}.jsonl`
+  if (found) await update($, transcript, () => found)
+  return found
 }
 
 // The session's name as /rename last set it: a string, null when the session was never named, or
@@ -160,10 +184,6 @@ async function tick($: Engine, idleMs: number, prefix: string): Promise<void> {
   }
 }
 
-async function remember($: Engine, path: unknown): Promise<void> {
-  if (typeof path === 'string' && path !== '') await update($, transcript, () => path)
-}
-
 async function active($: Engine): Promise<void> {
   lastActivity = await $.clock.now()
   isSleptThisIdle = false
@@ -186,15 +206,6 @@ export const register: Register = (on, options) => {
     timer = $.clock.every(CHECK_MS, () => { void tick($, idleMs, prefix) })
     return r
   })
-
-  // classic hook events carry the transcript's path. These hooks only watch: if one fails, the
-  // event goes on as if the mod weren't there.
-  on('classic.SessionStart', async ($, e, next) => { await remember($, e.transcript_path); return next(e) })
-    .catch(($, e, next) => next(e))
-  on('classic.UserPromptSubmit', async ($, e, next) => { await remember($, e.transcript_path); return next(e) })
-    .catch(($, e, next) => next(e))
-  on('classic.Stop', async ($, e, next) => { await remember($, e.transcript_path); return next(e) })
-    .catch(($, e, next) => next(e))
 
   on('prompt.submit', async ($, e, next) => { await active($); return next(e) })
     .catch(($, e, next) => next(e))
