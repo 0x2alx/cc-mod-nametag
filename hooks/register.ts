@@ -81,6 +81,7 @@ const PATH_TOOLS: Record<string, { field: string; weight: number; dir?: true }> 
 const transcript = atom({ plugin: 'nametag', key: 'transcript' } as const, null)
 const work = atom({ plugin: 'nametag', key: 'work' } as const, null as Record<string, number> | null)
 const ended = atom({ plugin: 'nametag', key: 'ended' } as const, null as string[] | null)
+const workBy = atom({ plugin: 'nametag', key: 'workBy' } as const, null as Record<string, string> | null)
 const turning = atom({ plugin: 'nametag', key: 'inTurn' } as const, false as boolean | null)
 const origin = atom({ plugin: 'nametag', key: 'from' } as const, null as number | null)
 
@@ -439,8 +440,9 @@ function serial($: Engine, fn: () => Promise<unknown>): Promise<void> {
 // (subagents, teammates) are in $.agent.list(). Background commands and workflows have no such list:
 // they are the ones the conversation put in the background since this process started, less those
 // it has an end notice for (the notice names the task id) or that TaskStop stopped. The tool calls
-// seen while the session runs count too, in case the conversation's copy lacks a result. A Monitor
-// is a watch, not work, and doesn't count.
+// seen while the session runs count too, in case the conversation's copy lacks a result, a
+// subagent's included: its end notice goes to the subagent, so it is looked for in the subagent's
+// own transcript. A Monitor is a watch, not work, and doesn't count.
 export function startedTask(tool: string, result: unknown): string | null {
   if (!result || typeof result !== 'object') return null
   const r = result as Record<string, unknown>
@@ -475,27 +477,48 @@ export function runningTasks(messages: readonly { role: string; text: string; to
   return started
 }
 
+// The transcript of a subagent of this session, beside the session's own:
+// <session id>.jsonl -> <session id>/subagents/agent-<agent id>.jsonl
+export function subagentTranscript(session: string, agent: string): string {
+  return `${session.replace(/\.jsonl$/, '')}/subagents/agent-${agent}.jsonl`
+}
+
+// Whether a subagent's background task has ended: its end notice is in the subagent's transcript.
+// A transcript that can't be read: ended once the subagent is no longer listed as at work.
+async function endedInSubagent($: Engine, id: string, agent: string, agents: () => Promise<{ id: string; status: string }[]>): Promise<boolean> {
+  const path = await transcriptPath($)
+  const rows = path ? await rowsWith($, subagentTranscript(path, agent), `<task-id>${id}</task-id>`) : undefined
+  if (rows !== undefined) return rows.includes(`<task-id>${id}</task-id>`)
+  return !(await agents()).some(a => a.id === agent && (AGENT_BUSY.has(a.status) || a.status === 'waiting'))
+}
+
 async function busy($: Engine): Promise<boolean> {
   const now = await $.clock.now()
   const gone = new Set((await read($, ended)) ?? [])
   const live = Object.entries((await read($, work)) ?? {}).filter(([id, at]) => !gone.has(id) && now - at <= WORK_MAX_MS)
   let messages: Parameters<typeof runningTasks>[0] | undefined
   try { messages = await $.session.messages() } catch {}
+  let listed: Promise<{ id: string; status: string }[]> | undefined
+  const agents = () => (listed ??= $.agent.list().catch(() => []))
   if (live.length) {
     // a notice the conversation holds ends a task too (one delivered into a running turn, say)
     const notices = (messages ?? []).filter(m => m.role === 'user' && m.text.includes('<task-id>')).map(m => m.text)
-    if (live.some(([id]) => !notices.some(t => mentions(t, id)))) return true
+    const by = (await read($, workBy)) ?? {}
+    const over: string[] = []
+    for (const [id] of live) {
+      if (notices.some(t => mentions(t, id))) continue
+      if (by[id] && (await endedInSubagent($, id, by[id]!, agents))) { over.push(id); continue }
+      if (over.length) await update($, ended, g => [...(g ?? []), ...over])
+      return true
+    }
+    if (over.length) await update($, ended, g => [...(g ?? []), ...over])
   }
   if (messages) {
     const running = runningTasks(messages, (await read($, origin)) ?? 0)
     for (const id of gone) running.delete(id)
     if (running.size) return true
   }
-  try {
-    return (await $.agent.list()).some(a => AGENT_BUSY.has(a.status))
-  } catch {
-    return false
-  }
+  return (await agents()).some(a => AGENT_BUSY.has(a.status))
 }
 
 // ---- idle -----------------------------------------------------------------------------------
@@ -827,6 +850,7 @@ async function adopt($: Engine, st: Style): Promise<void> {
   const rows = await $.session.messages().then(m => m.length, () => 0)
   await update($, work, () => null)
   await update($, ended, () => null)
+  await update($, workBy, () => null)
   await update($, origin, () => rows)
   const t = await transcriptActivity($).catch(() => null)
   // activity seen since the switch (a /rename, say) is the new session's own and stands
@@ -928,8 +952,9 @@ export const register: Register = (on, options) => {
       if (!('deny' in r && r.deny !== undefined) && !r.isError) {
         const id = startedTask(e.tool, r.result)
         const now = await $.clock.now()
-        // the main loop's: a subagent's own end notices go to its loop, and it is busy while it runs
-        if (id && !e.agentId) await update($, work, w => ({ ...(w ?? {}), [id]: now }))
+        // any loop's: a subagent's end notice goes to its own loop, so whose it is is kept too
+        if (id) await update($, work, w => ({ ...(w ?? {}), [id]: now }))
+        if (id && e.agentId) await update($, workBy, b => ({ ...(b ?? {}), [id]: e.agentId! }))
         if (e.tool === 'TaskStop') {
           const stopped = (r.result as { task_id?: unknown } | undefined)?.task_id
           if (typeof stopped === 'string') await update($, ended, g => [...(g ?? []), stopped])

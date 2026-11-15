@@ -75,6 +75,14 @@ function world(on: any, opts: { name?: string; size?: number; env?: Record<strin
     }
     w.greps++
     const needle = e.argv[0] === 'grep' ? e.argv[3]! : '"type":"custom-title"'
+    const file = e.argv.at(-1)! // grep's or findstr's
+    const sub = /\/subagents\/agent-([^/]+)\.jsonl$/.exec(file)
+    if (sub) {
+      const text = (w as any).subagents?.[sub[1]!]
+      if (text === undefined || file !== `${pathOf().replace(/\.jsonl$/, '')}/subagents/agent-${sub[1]}.jsonl`) return { value: { exitCode: 2, stdout: '', stderr: 'No such file' } }
+      const found = text.split('\n').filter((l: string) => l.includes(needle))
+      return { value: { exitCode: found.length ? 0 : 1, stdout: found.join('\n'), stderr: '' } }
+    }
     const hits = w.text.split('\n').filter(l => l.includes(needle))
     return { value: { exitCode: hits.length ? 0 : 1, stdout: hits.join('\n'), stderr: '' } }
   })
@@ -1434,12 +1442,48 @@ test('an end notice the conversation holds ends a background task, even one prom
   expect(w.renames.at(-1)).toBe('💤💤 Builder')
 })
 
-test('a subagent\'s own background command does not keep the session awake after the subagent ends', async ($, on) => {
+// The subagent's own transcript, where its background tasks' end notices go.
+function subagentRows(w: any, agent: string, text: string) {
+  w.subagents = { ...(w.subagents ?? {}), [agent]: text }
+}
+
+test('a subagent\'s background command keeps the session awake until its end notice, in the subagent\'s transcript', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on, { name: 'Builder' })
+  subagentRows(w, 'a1', '{"type":"user","message":"run make"}\n')
   await start($)
   w.results.Bash = { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'sub1' }
   await $.tool.call({ tool: 'Bash', command: 'make', run_in_background: true, agentId: 'a1' } as any)
+  await clock.advance(30 * MIN) // the subagent has ended; its command runs on
+  expect(w.renames).toEqual([])
+  subagentRows(w, 'a1', '{"type":"attachment","attachment":{"type":"queued_command","prompt":"<task-notification><task-id>sub1</task-id><status>completed</status></task-notification>"}}\n')
+  await clock.advance(11 * MIN)
+  expect(w.renames).toEqual(['💤 Builder'])
+})
+
+test('a subagent\'s background command whose transcript can\'t be read counts while the subagent is at work', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  w.agents = [{ id: 'a1', status: 'waiting' }] // on its own background work
+  await start($)
+  w.results.Bash = { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'sub1' }
+  await $.tool.call({ tool: 'Bash', command: 'make', run_in_background: true, agentId: 'a1' } as any)
+  await clock.advance(30 * MIN)
+  expect(w.renames).toEqual([])
+  w.agents = [{ id: 'a1', status: 'completed' }]
+  await clock.advance(11 * MIN)
+  expect(w.renames).toEqual(['💤 Builder'])
+})
+
+test('a subagent\'s background command stopped by TaskStop in its loop ends', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  subagentRows(w, 'a1', '')
+  await start($)
+  w.results.Bash = { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'sub1' }
+  await $.tool.call({ tool: 'Bash', command: 'make', run_in_background: true, agentId: 'a1' } as any)
+  w.results.TaskStop = { task_id: 'sub1' }
+  await $.tool.call({ tool: 'TaskStop', task_id: 'sub1', agentId: 'a1' } as any)
   await clock.advance(11 * MIN)
   expect(w.renames).toEqual(['💤 Builder'])
 })

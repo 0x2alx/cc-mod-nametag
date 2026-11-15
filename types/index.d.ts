@@ -5,6 +5,7 @@
 //   transcript: this session's transcript, once found
 //   work: background commands and workflows seen starting while this process runs, task id -> when (ms)
 //   ended: task ids seen ending (a notice, TaskStop) while this process runs
+//   workBy: of those background tasks, the ones a subagent started, task id -> agent id
 //   inTurn: a turn of the main conversation is running
 //   from: how many rows the conversation had when this process (or a /clear) started; null: not yet
 
@@ -12,6 +13,7 @@ declare module 'claude-code' {
   interface PluginState {
     'nametag': {
       transcript: string | null; work: Record<string, number> | null; ended: string[] | null
+      workBy: Record<string, string> | null
       inTurn: boolean | null; from: number | null
     }
   }
