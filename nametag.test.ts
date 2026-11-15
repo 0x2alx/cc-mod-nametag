@@ -77,6 +77,11 @@ function world(on: any, opts: { name?: string; size?: number; env?: Record<strin
   return w
 }
 
+// The store's keys other than the saved last activity.
+function marks(w: { store: Map<string, unknown> }) {
+  return [...w.store.keys()].filter(k => !k.startsWith('seen:'))
+}
+
 // The person types /rename.
 async function personRename($: any, name: string) {
   await $.command.run({ command: 'rename', args: name, origin: { kind: 'composer' } })
@@ -477,32 +482,73 @@ test('switching sessions reads the new one', async ($, on) => {
   expect(w.renames).toEqual(['Other'])
 })
 
-test('a rename while marked counts as activity once noticed; the new name is marked after a fresh idle spell', async ($, on) => {
+test('renamed from the app while marked: once noticed, the new name gets the mark the idle time calls for', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on, { name: 'Builder' })
   await start($)
   await clock.advance(11 * MIN)
-  w.title('New name') // the person renames while marked, without sending anything
-  await clock.advance(2 * HOUR + 50 * MIN) // level 2 is due: the mod notices the rename instead of marking
-  expect(w.renames).toEqual(['💤 Builder'])
-  await clock.advance(7 * MIN) // noticed at 3 h, so 3 h 08: not yet
-  expect(w.renames).toEqual(['💤 Builder'])
-  await clock.advance(3 * MIN) // 10 idle minutes after noticing
-  expect(w.renames).toEqual(['💤 Builder', '💤 New name'])
+  w.title('New name') // the person renames from the app, without sending anything
+  await clock.advance(2 * HOUR + 50 * MIN) // level 2 is due: the mod sees the new name and marks it
+  expect(w.renames).toEqual(['💤 Builder', '💤💤 New name'])
   await turn($, 't1')
   expect(w.renames.at(-1)).toBe('New name')
 })
 
-test('a session that starts marked (restart, resume) is woken at once, without a turn', async ($, on) => {
+test('a session that starts marked, with no saved activity, is woken at once, without a turn', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on, { name: '💤💤 Builder' })
   preset(w, ID, '💤💤 Builder', 'Builder')
   await start($)
   await clock.advance(MIN)
   expect(w.renames).toEqual(['Builder'])
-  expect(w.store.size).toBe(0)
+  expect(marks(w)).toEqual([])
   await turn($, 't1')
   expect(w.renames).toEqual(['Builder'])
+})
+
+test('a restart goes on counting from the last activity: 4 hours idle gives 💤💤 at once', async ($, on) => {
+  const clock = mock.clock(on, { now: 100 * HOUR })
+  const w = world(on, { name: 'Builder' })
+  w.store.set(`seen:${ID}`, 96 * HOUR)
+  await start($)
+  expect(w.renames).toEqual(['💤💤 Builder'])
+  await clock.advance(9 * HOUR) // 13 hours in all
+  expect(w.renames).toEqual(['💤💤 Builder', '💤💤💤 Builder'])
+  await turn($, 't1')
+  expect(w.renames.at(-1)).toBe('Builder')
+})
+
+test('a restart of a marked session sets the level the idle time calls for, up or down', async ($, on) => {
+  mock.clock(on, { now: 100 * HOUR })
+  const w = world(on, { name: '💤 Builder' })
+  preset(w, ID, '💤 Builder', 'Builder')
+  w.store.set(`seen:${ID}`, 87 * HOUR) // 13 hours
+  await start($)
+  expect(w.renames).toEqual(['💤💤💤 Builder'])
+})
+
+test('a restart soon after activity: no mark yet, and the next comes when the idle time is due', async ($, on) => {
+  const clock = mock.clock(on, { now: 100 * HOUR })
+  const w = world(on, { name: '💤 Builder' })
+  preset(w, ID, '💤 Builder', 'Builder')
+  w.store.set(`seen:${ID}`, 100 * HOUR - 5 * MIN)
+  await start($)
+  expect(w.renames).toEqual(['Builder'])
+  await clock.advance(4 * MIN)
+  expect(w.renames).toEqual(['Builder'])
+  await clock.advance(2 * MIN)
+  expect(w.renames).toEqual(['Builder', '💤 Builder'])
+})
+
+test('activity is saved, so a reload keeps the idle time running', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  await start($)
+  await turn($, 't1')
+  await clock.advance(9 * MIN)
+  await start($) // the reload: not activity
+  await clock.advance(2 * MIN)
+  expect(w.renames).toEqual(['💤 Builder'])
 })
 
 test('a session renamed while it was closed keeps that name at start', async ($, on) => {
@@ -513,7 +559,7 @@ test('a session renamed while it was closed keeps that name at start', async ($,
   await start($)
   await clock.advance(MIN)
   expect(w.renames).toEqual([])
-  expect(w.store.size).toBe(0)
+  expect(marks(w)).toEqual([])
 })
 
 // ---- work in the background ----
@@ -624,7 +670,7 @@ test('records not touched for 90 days and holds that are over are dropped', asyn
   w.store.set('freeze:old', 100 * 24 * HOUR - 1)
   w.store.set('freeze:new', 100 * 24 * HOUR + HOUR)
   await start($)
-  expect([...w.store.keys()]).toEqual(['mark:new', 'freeze:new'])
+  expect([...w.store.keys()]).toEqual(['mark:new', 'freeze:new', `seen:${ID}`])
 })
 
 test('the person\'s /rename while marked: their name stands, the record goes, the next mark waits a full idle spell', async ($, on) => {
@@ -846,14 +892,13 @@ test('topic: renamed from the app (no /rename), the next 💤 sees it; with no h
   for (const f of ['c', 'd', 'g']) await edit($, `/work/demo/alpha/${f}.ts`)
   await busyFor($, clock, 16, 'z')
   expect(w.store.has(`mark:${ID}`)).toBe(true) // the files still say alpha, as the record does: no name read
-  await clock.advance(11 * MIN) // the 💤 reads the name: it is the person's now
-  expect(w.renames).toEqual(['Builder [alpha]'])
-  expect(w.store.has(`mark:${ID}`)).toBe(false)
+  await clock.advance(11 * MIN) // the 💤 reads the name: it is the person's now, and marked as such
+  expect(w.renames).toEqual(['Builder [alpha]', '💤 Shipping'])
   await edit($, '/work/demo/alpha/e.ts')
   await edit($, '/work/demo/alpha/f.ts')
   await turn($, 'b1')
   await clock.advance(MIN)
-  expect(w.renames).toEqual(['Builder [alpha]', 'Shipping [alpha]'])
+  expect(w.renames).toEqual(['Builder [alpha]', '💤 Shipping', 'Shipping', 'Shipping [alpha]'])
 })
 
 test('topic: a search of the whole session folder says nothing', { options: TOPIC }, async ($, on) => {
@@ -922,8 +967,8 @@ test('topic: the person renames it, so topics wait 4 hours', { options: TOPIC },
   await turns($, clock, 3)
   expect(w.renames).toEqual(['Builder [alpha]'])
   w.title('Shipping') // the person's /rename
-  await clock.advance(11 * MIN) // the sleep notices the rename
-  expect(w.renames).toEqual(['Builder [alpha]'])
+  await clock.advance(11 * MIN) // the sleep notices the rename, and marks the new name
+  expect(w.renames).toEqual(['Builder [alpha]', '💤 Shipping'])
   expect(w.store.has(`freeze:${ID}`)).toBe(true)
   await edit($, '/work/demo/alpha/c.ts')
   await edit($, '/work/demo/alpha/d.ts')
@@ -958,7 +1003,7 @@ test('topic: turned off, a topic left in a name comes off with the next rename',
   expect(w.renames).toEqual(['💤 Builder'])
   await turn($, 't1')
   expect(w.renames).toEqual(['💤 Builder', 'Builder'])
-  expect(w.store.size).toBe(0)
+  expect(marks(w)).toEqual([])
 })
 
 test('topic: off by default, no path noted and no model call', async ($, on) => {

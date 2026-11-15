@@ -36,6 +36,7 @@ const FS_READ_MAX = 4 * 1024 * 1024 // $.fs.read refuses bigger files
 const TITLE_ROW = '"type":"custom-title"'
 const DEFAULTS: readonly [number, string][] = [[10, '💤'], [180, '💤'], [720, '💤']]
 
+const SAVE_MS = 60 * 1000 // the last activity is written to the store at most this often
 const SCAN_RETRY_MS = 10 * 60 * 1000 // a transcript not found: search every project folder again after this
 
 const RECORD_DAYS = 90 // records of sessions not renamed by the mod for this long are dropped
@@ -74,6 +75,7 @@ const turning = atom({ plugin: 'nametag', key: 'inTurn' } as const, false as boo
 const live = atom({ plugin: 'nametag', key: 'record' } as const, null as { id: string; mark: Mark | null } | null)
 
 let lastActivity = 0
+let savedAt = 0 // when lastActivity was last written to the store
 let reached = 0 // levels applied (or found unneeded) during this idle spell
 let sleeping: Promise<void> | undefined // the rename job in flight (see serial)
 let wakePending = false // the last attempt to take the mark off must be tried again
@@ -286,11 +288,19 @@ async function prune($: Engine): Promise<void> {
     } else if (key.startsWith('mark:')) {
       const v = asMark(await $.store.get(key))
       if (!v || v.at < cutoff) await $.store.delete(key)
+    } else if (key.startsWith('seen:')) {
+      const at = await $.store.get(key)
+      if (key !== `seen:${await $.session.id()}` && (typeof at !== 'number' || at < cutoff)) await $.store.delete(key)
     } else if (key.startsWith('freeze:')) {
       const until = await $.store.get(key)
       if (typeof until !== 'number' || until <= now) await $.store.delete(key)
     }
   }
+}
+
+// When the session last had activity (ms since epoch), across restarts.
+function seenKey(id: string): string {
+  return `seen:${id}`
 }
 
 // After the person renames the session, topics wait for `topic_freeze_hours`.
@@ -351,8 +361,8 @@ async function render($: Engine, st: Style, want: Want): Promise<'done' | 'retry
   return 'done'
 }
 
-// Marks the name with the first `n` levels. 'renamed' counts as activity: the person is here, and
-// their new name is marked after the next idle spell.
+// Marks the name with the first `n` levels. 'renamed': the person renamed the session since; their
+// name stands, and is marked from there.
 function sleep($: Engine, st: Style, n: number): Promise<'done' | 'retry' | 'renamed'> {
   return render($, st, { level: n })
 }
@@ -427,17 +437,23 @@ async function tick($: Engine, st: Style): Promise<void> {
   if (await busy($)) return active($)
   await serial($, async () => {
     // activity during the rename resets `reached`; the turn's end then takes the mark off again
-    const result = await sleep($, st, n)
-    if (result === 'renamed') await active($)
-    else if (result === 'done' && lastActivity === since) {
-      reached = n
-    }
+    let result = await sleep($, st, n)
+    // Renamed from the app since: no activity, so the new name gets the mark the idle time calls
+    // for, now. (A /rename typed in the session is activity, and the idle time starts over.)
+    if (result === 'renamed' && lastActivity === since) result = await sleep($, st, n)
+    if (result === 'done' && lastActivity === since) reached = n
   })
 }
 
+// Activity: the idle time starts over. Kept in the store too (at most once a minute), so a restart
+// or a reload goes on counting from the real last activity.
 async function active($: Engine): Promise<void> {
-  lastActivity = await $.clock.now()
+  const now = await $.clock.now()
+  lastActivity = now
   reached = 0
+  if (now - savedAt < SAVE_MS) return
+  savedAt = now
+  await $.store.set(seenKey(await $.session.id()), now)
 }
 
 // ---- the topic ------------------------------------------------------------------------------
@@ -635,6 +651,7 @@ async function named($: Engine, st: Style, id: string): Promise<{ base: string; 
     if (mine && mine.set !== name) {
       await dropRecord($, id)
       await freeze($, st)
+      reached = 0 // the next tick marks the new name as the idle time calls for
       return
     }
     out = { base: mine ? mine.base : name, current: mine?.topic ?? null }
@@ -702,10 +719,24 @@ export const register: Register = (on, options) => {
     interactive = e.isInteractive
     if (!e.isInteractive) return r
     await prune($).catch(err => $.ui.log(`nametag: ${err}`, { to: 'debug' }))
-    await active($)
-    // A session that starts is in use: a mark it ended with (restart, resume, reload) comes off
-    // now. Not awaited: a rename waits for a running turn; ticks skip and wake waits while it runs.
-    void serial($, () => unmark($, st))
+    // A start (restart, resume, reload) is not activity: the idle time runs on from the last
+    // activity the store saw, and the name gets the mark that time calls for right away, no more and
+    // no less. A session the store hasn't seen starts its idle time now. Not awaited: a rename waits
+    // for a running turn; ticks skip and wake waits while it runs.
+    const now = await $.clock.now()
+    const seen = await $.store.get(seenKey(await $.session.id()))
+    savedAt = 0
+    if (typeof seen === 'number' && seen <= now) {
+      lastActivity = seen
+      savedAt = seen
+      reached = 0
+    } else await active($)
+    const since = lastActivity
+    const n = st.levels.filter(l => now - since >= l.ms).length
+    void serial($, async () => {
+      if (n === 0) return unmark($, st)
+      if ((await render($, st, { level: n })) === 'done' && lastActivity === since) reached = n
+    })
     if (st.levels.length) {
       timer = $.clock.every(CHECK_MS, () => {
         tick($, st).catch(err => $.ui.log(`nametag: ${err}`, { to: 'debug' }))
