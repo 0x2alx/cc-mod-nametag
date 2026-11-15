@@ -1,33 +1,36 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Mark } from '../types'
-
 // nametag: tags a session's name with what it is doing. Two tags, each its own option.
 //
-// Idle mark (on by default): marks an idle session's name in up to three steps. Each level has a delay and an
-// emoji: after level 1's delay with no prompt and no turn the name becomes "💤 name", after level
+// Idle mark (on by default): marks an idle session's name in up to three steps. Each level has a
+// delay and an emoji: after level 1's delay with no activity the name becomes "💤 name", after level
 // 2's "💤💤 name", after level 3's "💤💤💤 name" (via /rename). Options put the mark after the
-// name, join it with a separator, or wrap it in brackets. The mark always matches the time since
-// the last activity, a restart included; at the end of the next turn it comes off. Interactive
-// sessions only, and only sessions that have a name (/rename was used at least once, or the session
-// was started with --name).
+// name, join it with a separator, or wrap it in brackets. Every check sets exactly the levels the
+// time since the last activity calls for; at the end of the next turn the mark comes off.
+// Interactive sessions only, and only sessions that have a name (/rename was used at least once,
+// or the session was started with --name).
 //
 // Topic (option, off by default): a short label for what the session is working on, kept at the
-// very end of the name ("Builder [billing-api]", asleep "💤 Builder [billing-api]"), awake or not.
-// It comes from the paths of the session's last tool calls, read from the conversation each time (a
-// project folder that clearly leads), or, when they don't say, from one small-model call on the
-// last few messages. Checked when the session starts and at the end of every turn; the model at
-// most every 10 minutes. Renamed only when it changes. A name the person gives the session gets the
-// topic too; `/topic off` turns topics off for this session, `/topic on` back on.
+// very end of the name ("Builder [billing]", asleep "💤 Builder [billing]"), awake or not; one
+// word by default, two with `topic_words: 2`.
+// It comes from the paths of the session's last tool calls (a project folder that clearly leads)
+// or, when they don't say, from one small-model call on the last few messages. Checked when the
+// session starts and at the end of every turn; the model at most every 10 minutes. `/topic off`
+// turns topics off for this session, `/topic on` back on.
 //
-// The name is always built from the name the person gave the session, never parsed out of a name.
-// The transcript doesn't say who set a name, so the mod keeps a record per session in its store:
-// the name it set and the person's name under it. The current name is the person's own unless it
-// is exactly the one in the record.
-//
-// No API returns the session's name, so it is read from the transcript: the newest
-// {"type":"custom-title","customTitle":...} row. That row format is undocumented and may change.
+// Nothing is kept between runs but the time of each session's last model check. Everything else is
+// worked out when it is needed, from the session as it is then:
+// - the name, read from the transcript (no API returns it): the newest
+//   {"type":"custom-title","customTitle":...} row, a format that is undocumented and may change;
+// - the person's name under the mark and topic: the name with the mark and topic as this mod builds
+//   them taken off (the transcript doesn't say who set a name, so it can't be looked up);
+// - the last activity: the newest timestamped prompt, reply or tool result in the transcript, kept
+//   up to date while the session runs by its prompts and turns;
+// - work in the background: the session's agents, and the background commands and workflows the
+//   conversation started that it has no end notice for;
+// - the topic: the paths of the conversation's last tool calls, or its last messages;
+// - /topic off or on: the last such command in the transcript.
 
 type Engine = EngineInterface
 
@@ -35,17 +38,17 @@ export type Level = { ms: number; emoji: string }
 
 const CHECK_MS = 60 * 1000
 const FS_READ_MAX = 4 * 1024 * 1024 // $.fs.read refuses bigger files
+const TAIL_BYTES = 512 * 1024 // a big transcript is read from its last this many bytes
 const TITLE_ROW = '"type":"custom-title"'
+const TOPIC_ROW = '<command-name>/topic</command-name>'
 const DEFAULTS: readonly [number, string][] = [[10, '💤'], [180, '💤'], [720, '💤']]
 
-const SAVE_MS = 60 * 1000 // the last activity is written to the store at most this often
 const SCAN_RETRY_MS = 10 * 60 * 1000 // a transcript not found: search every project folder again after this
+const KEEP_DAYS = 90 // a session's last model check is forgotten after this long
 
-const RECORD_DAYS = 90 // records of sessions not renamed by the mod for this long are dropped
-
-const WORK_MAX_MS = 24 * 60 * 60 * 1000 // a background task whose end was never seen stops counting after this
+const WORK_MAX_MS = 24 * 60 * 60 * 1000 // a background task seen starting whose end was never seen stops counting after this
 // Not 'waiting': that may be on a plan's approval, which waits for the person; an agent waiting on
-// its own background work is covered by that work, tracked below like any other.
+// its own background work is covered by that work.
 const AGENT_BUSY = new Set(['pending', 'running'])
 
 const MIN_MS = 60 * 1000
@@ -56,7 +59,7 @@ const TOPIC_MAX_WAIT_MS = 120 * MIN_MS // checks that find nothing double the wa
 const TOPIC_SHARE = 0.6 // a project leads when it has this share of the path weight...
 const TOPIC_MIN_WEIGHT = 5 // ...and at least this much of it
 const TOPIC_MAX_LEN = 20
-const TOPIC_MAX_WORDS = 2
+const TOPIC_MAX_WORDS = 2 // the most `topic_words` allows
 // Tools whose path says where the work is: an edit says more than a read.
 const PATH_TOOLS: Record<string, { field: string; weight: number; dir?: true }> = {
   Edit: { field: 'file_path', weight: 3 },
@@ -67,21 +70,25 @@ const PATH_TOOLS: Record<string, { field: string; weight: number; dir?: true }> 
   Glob: { field: 'path', weight: 1, dir: true },
 }
 
+// In the session's memory (it outlives a hot reload of the mod, not a restart), nothing on disk:
+// the transcript's path once found; background tasks seen starting while this process runs, and
+// ending; whether a turn is running; how many rows the conversation had when this process started
+// (a background task started before that died with the process that ran it).
 const transcript = atom({ plugin: 'nametag', key: 'transcript' } as const, null)
-// Background commands and workflows still running: task id -> when it started.
 const work = atom({ plugin: 'nametag', key: 'work' } as const, null as Record<string, number> | null)
-// A turn of the main conversation is running. In the session's state so a hot reload mid-turn keeps it.
+const ended = atom({ plugin: 'nametag', key: 'ended' } as const, null as string[] | null)
 const turning = atom({ plugin: 'nametag', key: 'inTurn' } as const, false as boolean | null)
-// This session's record as last written, so another session writing the shared store can't lose it.
-const live = atom({ plugin: 'nametag', key: 'record' } as const, null as { id: string; mark: Mark | null } | null)
+const origin = atom({ plugin: 'nametag', key: 'from' } as const, null as number | null)
 
-let lastActivity = 0
-let savedAt = 0 // when lastActivity was last written to the store
-let reached = 0 // levels applied (or found unneeded) during this idle spell
+let lastActivity = 0 // from the transcript at start, then from the session's prompts and turns
 let sleeping: Promise<void> | undefined // the rename job in flight (see serial)
 let wakePending = false // the last attempt to take the mark off must be tried again
 let personRenames = 0 // the person's /renames seen so far
 let personName = '' // the name the last of them gave
+let topicOff = false // /topic off, from the transcript at start, then from the command
+let misses = 0 // model checks in a row that found nothing
+let maxWords = 1 // words in a topic, from `topic_words`
+let stuck = '' // a name this mod set that the transcript never showed: not tried again and again
 let scanAfter = 0
 let interactive = false
 let timer: { cancel(): void } | undefined
@@ -119,7 +126,8 @@ export function style(options: Record<string, unknown>): Style {
   return {
     levels: levels(options), atEnd: options.position === 'end', sep, open: pair?.[0] ?? '', close: pair?.[1] ?? '',
     topic: options.topic === 'on',
-    topicSep: typeof options.topic_separator === 'string' ? options.topic_separator.trim() : '',
+    // a topic with neither brackets nor a separator couldn't be told apart from the name: '·' then
+    topicSep: typeof options.topic_separator === 'string' && options.topic_separator.trim() !== '' ? options.topic_separator.trim() : (topicPair ? '' : '·'),
     topicOpen: topicPair?.[0] ?? '', topicClose: topicPair?.[1] ?? '',
     topicModel: model,
   }
@@ -211,26 +219,106 @@ async function transcriptPath($: Engine): Promise<string | null> {
   return found
 }
 
-// The session's name as /rename last set it: a string, null when the session was never named, or
-// undefined when the transcript can't be found or read (try again later).
-async function currentName($: Engine): Promise<string | null | undefined> {
+// The end of the transcript: the whole file when $.fs.read can take it, else its last TAIL_BYTES
+// through `tail`. `whole` says whether that is all of it. Undefined when it can't be read.
+async function transcriptEnd($: Engine): Promise<{ text: string; whole: boolean; path: string } | undefined> {
   const path = await transcriptPath($)
   if (!path) return undefined
   try {
     const st = await $.fs.stat(path)
     if (st.kind !== 'file') return undefined
-    if (st.size <= FS_READ_MAX) return newestTitle(await $.fs.read(path))
+    if (st.size <= FS_READ_MAX) return { text: await $.fs.read(path), whole: true, path }
   } catch {
     return undefined
   }
-  // Too big for $.fs.read: let the system's search tool pick the rows.
-  for (const argv of [['grep', '-a', '-F', TITLE_ROW, path], ['findstr', '/L', '/C:custom-title', path]]) {
+  try {
+    const r = await $.process.run(['tail', '-c', String(TAIL_BYTES), path], { timeoutMs: 10000 })
+    if (r.exitCode === 0) return { text: r.stdout, whole: false, path }
+  } catch {}
+  return { text: '', whole: false, path }
+}
+
+// The transcript's rows that hold `needle`, all of them (the system's search tool for a big file).
+async function rowsWith($: Engine, path: string, needle: string): Promise<string | undefined> {
+  for (const argv of [['grep', '-a', '-F', needle, path], ['findstr', '/L', `/C:${needle}`, path]]) {
     try {
       const r = await $.process.run(argv, { timeoutMs: 20000 })
-      if (r.exitCode === 0 || r.exitCode === 1) return newestTitle(r.stdout)
+      if (r.exitCode === 0 || r.exitCode === 1) return r.stdout
     } catch {}
   }
   return undefined
+}
+
+// The session's name as it is now: a string, null when the session was never named, or undefined
+// when the transcript can't be found or read (try again later). Claude Code writes the title row
+// again at each prompt, so the end of the transcript nearly always holds the newest.
+async function currentName($: Engine): Promise<string | null | undefined> {
+  const end = await transcriptEnd($)
+  if (!end) return undefined
+  const t = newestTitle(end.text)
+  if (t !== null || end.whole) return t
+  const rows = await rowsWith($, end.path, TITLE_ROW)
+  return rows === undefined ? undefined : newestTitle(rows)
+}
+
+// When the session last had activity, from the transcript: the newest timestamped row of the
+// conversation itself (a prompt, a reply, a tool result, a background task's notice). Renames,
+// notices and bookkeeping rows don't count. Null when none is found.
+export function lastActivityIn(text: string): number | null {
+  const lines = text.split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const l = lines[i]!
+    if (!l.includes('"timestamp"') || !(l.includes('"type":"user"') || l.includes('"type":"assistant"'))) continue
+    try {
+      const row = JSON.parse(l)
+      if ((row?.type === 'user' || row?.type === 'assistant') && typeof row.timestamp === 'string') {
+        const t = Date.parse(row.timestamp)
+        if (!Number.isNaN(t)) return t
+      }
+    } catch {}
+  }
+  return null
+}
+
+async function transcriptActivity($: Engine): Promise<number | null> {
+  const end = await transcriptEnd($)
+  return end ? lastActivityIn(end.text) : null
+}
+
+// ---- the name, taken apart ---------------------------------------------------------------------
+
+function escape(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+// The name as this mod builds it, taken apart: the person's name, the levels of the mark on it, the
+// topic at its end. A mark in another style (the options changed) is taken off too, when it is a
+// run of the level emojis or 💤 at the front. A name that only looks built ("💤 Notes", typed so)
+// is read the same way: the transcript can't say who set it.
+export function decompose(name: string, st: Style): { base: string; level: number; topic: string | null } {
+  let rest = name
+  let topic: string | null = null
+  const sep = st.topicSep === '' ? ' ' : ` ${escape(st.topicSep)} `
+  const t = !st.topic ? null : new RegExp(`${sep}${escape(st.topicOpen)}([\\p{L}\\p{N}._-]{1,${TOPIC_MAX_LEN}})${escape(st.topicClose)}$`, 'u').exec(rest)
+  if (t && t.index > 0) {
+    topic = t[1]!
+    rest = rest.slice(0, t.index)
+  }
+  for (let n = st.levels.length; n >= 1; n--) {
+    const [pre, post] = marked('\u0000', st, n).split('\u0000') as [string, string]
+    if (rest.length > pre.length + post.length && rest.startsWith(pre) && rest.endsWith(post)) {
+      return { base: rest.slice(pre.length, rest.length - post.length), level: n, topic }
+    }
+  }
+  // another style: the emojis, maybe in brackets, joined by a space or a short separator of signs
+  const emojis = [...new Set(['💤', ...st.levels.map(l => l.emoji)])].map(escape).join('|')
+  const mark = `[[({<]?(?:${emojis})+[\\])}>]?`
+  const join = '\\s+(?:[^\\p{L}\\p{N}\\s]{1,3}\\s+)?'
+  const front = new RegExp(`^${mark}${join}`, 'u').exec(rest)
+  if (front && rest.length > front[0].length) return { base: rest.slice(front[0].length), level: 1, topic }
+  const back = new RegExp(`${join}${mark}$`, 'u').exec(rest)
+  if (back && back.index > 0) return { base: rest.slice(0, back.index), level: 1, topic }
+  return { base: rest, level: 0, topic }
 }
 
 // ---- renaming ------------------------------------------------------------------------------
@@ -245,219 +333,42 @@ async function rename($: Engine, name: string): Promise<boolean> {
   }
 }
 
-// ---- the record -----------------------------------------------------------------------------
-
-function recordKey(id: string): string {
-  return `mark:${id}`
-}
-
-function asMark(v: unknown): Mark | null {
-  const m = v as Partial<Mark> | undefined
-  return m && typeof m.set === 'string' && typeof m.base === 'string' && typeof m.at === 'number' ? (m as Mark) : null
-}
-
-// The session's own record lives in its state while it runs; the store carries it across restarts.
-async function record($: Engine, id: string): Promise<Mark | null> {
-  const l = await read($, live)
-  if (l && l.id === id) return l.mark
-  return asMark(await $.store.get(recordKey(id)))
-}
-
-async function setRecord($: Engine, id: string, mark: Mark): Promise<void> {
-  await update($, live, () => ({ id, mark }))
-  await $.store.set(recordKey(id), mark)
-}
-
-async function dropRecord($: Engine, id: string): Promise<void> {
-  await update($, live, () => ({ id, mark: null }))
-  await $.store.delete(recordKey(id))
-}
-
-// Drops the records the mod hasn't touched for RECORD_DAYS (sessions ended and never resumed), and
-// holds on topics that are over. This session's own record is kept.
-async function prune($: Engine): Promise<void> {
-  const now = await $.clock.now()
-  const cutoff = now - RECORD_DAYS * 24 * 60 * 60 * 1000
-  const own = recordKey(await $.session.id())
-  for (const key of await $.store.keys()) {
-    if (key === own) {
-      // this session's own: kept, and its age starts over
-      const mine = await record($, await $.session.id())
-      if (mine) await setRecord($, await $.session.id(), { ...mine, at: now })
-    } else if (key.startsWith('mark:')) {
-      const v = asMark(await $.store.get(key))
-      if (!v || v.at < cutoff) await $.store.delete(key)
-    } else if (key.startsWith('seen:') || key.startsWith('asked:') || key.startsWith('notopic:')) {
-      const v = await $.store.get(key)
-      const at = typeof v === 'number' ? v : (v as { at?: unknown } | undefined)?.at
-      const mine = key.endsWith(`:${await $.session.id()}`)
-      if (!mine && (typeof at !== 'number' || at < cutoff)) await $.store.delete(key)
-    }
-  }
-}
-
-// When the session last had activity (ms since epoch), across restarts.
-function seenKey(id: string): string {
-  return `seen:${id}`
-}
-
-// `/topic off`: no topic for this session (a time, so it is pruned like the rest); `/topic on` clears it.
-function offKey(id: string): string {
-  return `notopic:${id}`
-}
-
-async function topicOff($: Engine, id: string): Promise<boolean> {
-  return (await $.store.get(offKey(id))) !== undefined
-}
-
-// ---- sleeping and waking ---------------------------------------------------------------------
-
-// Sets the name to the person's name with the mark of `want.level` levels and the topic
-// `want.topic` (each left as it is when not given). Returns 'retry' when it should be tried again
-// later (the name couldn't be read, or the rename failed), and 'renamed' when the person renamed
-// the session since the mod last did: their name stands, and is built on from the next check.
+// Sets the name, read right then, to the person's name under it with the mark of `want.level` levels
+// and the topic `want.topic` (each left as the name has it when not given). Returns 'retry' when it
+// should be tried again later (the name couldn't be read, or the rename failed).
 type Want = { level?: number; topic?: string | null }
 
-async function render($: Engine, st: Style, want: Want): Promise<'done' | 'retry' | 'renamed'> {
+async function render($: Engine, st: Style, want: Want): Promise<'done' | 'retry'> {
   const seen = personRenames
   const name = await currentName($)
   if (name === undefined) return 'retry'
   if (name === null || name.trim() === '') return 'done'
-  const id = await $.session.id()
-  const mine = await record($, id)
-  if (mine && mine.set !== name) {
-    await dropRecord($, id)
-    return 'renamed'
+  const now = decompose(name, st)
+  const level = Math.min(want.level ?? now.level, st.levels.length)
+  let topic = want.topic !== undefined ? want.topic : now.topic
+  if (!st.topic || topicOff || (topic && inName(now.base, topic))) topic = null
+  const target = build(now.base, st, level, topic)
+  if (target === name) {
+    stuck = ''
+    return 'done'
   }
-  const base = mine ? mine.base : name
-  const level = want.level ?? mine?.level ?? 0
-  let topic = want.topic !== undefined ? want.topic : (mine?.topic ?? null)
-  if (!st.topic || (topic && inName(base, topic)) || (topic && (await topicOff($, id)))) topic = null
-  const target = build(base, st, level, topic)
-  if (target !== name && !(await rename($, target))) return 'retry'
-  if (personRenames !== seen) {
+  if (target === stuck) return 'done' // renamed to it before, and the transcript never showed it
+  if (!(await rename($, target))) return 'retry'
+  if ((await currentName($)) !== target && personRenames === seen) stuck = target
+  if (personRenames !== seen && personName && (await currentName($)) !== personName) {
     // The person's /rename ran while this one waited its turn in the command queue, and this one,
-    // run after it, may have replaced their name: theirs stands.
-    if (personName && (await currentName($)) !== personName) await rename($, personName)
-    await dropRecord($, id)
-    return 'renamed'
+    // run after it, replaced their name: theirs stands, built on at the next check.
+    await rename($, personName)
   }
-  if (target === base) await dropRecord($, id)
-  else await setRecord($, id, { set: target, base, at: await $.clock.now(), level, topic })
   return 'done'
 }
 
-// Marks the name with the first `n` levels. 'renamed': the person renamed the session since; their
-// name stands, and is marked from there.
-function sleep($: Engine, st: Style, n: number): Promise<'done' | 'retry' | 'renamed'> {
-  return render($, st, { level: n })
-}
-
-// Takes the mark off, if the name is still the one this mod set. A name changed since (by /rename)
-// is the person's new name and stays. The topic stays. One that fails is tried again by the tick.
+// Takes the mark off, the topic stays. One that fails is tried again by the tick.
 async function unmark($: Engine, st: Style): Promise<void> {
-  wakePending = false
-  const mine = await record($, await $.session.id())
-  if (!mine) return
-  if ((mine.level ?? 1) === 0) return // a topic only: nothing to take off (a record with no level is a mark)
   wakePending = (await render($, st, { level: 0 })) === 'retry'
 }
 
-// ---- work in the background ----------------------------------------------------------------
-
-// A command, workflow or agent working in the background keeps the session from being idle. Agents
-// (subagents, teammates) are in $.agent.list(). Background commands and workflows are not: they are
-// noted when a tool call puts one in the background and dropped when the notice of its end arrives
-// (its task id appears in that notice), when TaskStop stops it, or after WORK_MAX_MS. A Monitor is
-// a watch, not work, and doesn't count.
-export function startedTask(tool: string, result: unknown): string | null {
-  if (!result || typeof result !== 'object') return null
-  const r = result as Record<string, unknown>
-  if (tool === 'Bash' && typeof r.backgroundTaskId === 'string' && r.backgroundEndsWithFinalResponse !== true) return r.backgroundTaskId
-  if (tool === 'Workflow' && typeof r.taskId === 'string' && (r.status === 'async_launched' || r.status === 'remote_launched')) return r.taskId
-  return null
-}
-
-async function track($: Engine, id: string): Promise<void> {
-  const now = await $.clock.now()
-  await update($, work, w => ({ ...(w ?? {}), [id]: now }))
-}
-
-async function untrack($: Engine, ended: (id: string) => boolean): Promise<void> {
-  const w = await read($, work)
-  if (!w) return
-  const left = Object.fromEntries(Object.entries(w).filter(([id]) => !ended(id)))
-  if (Object.keys(left).length !== Object.keys(w).length) await update($, work, () => left)
-}
-
-// Whether a notice names the task id as a whole word ("b1" is not in "b12").
-export function mentions(text: string, id: string): boolean {
-  const esc = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  return new RegExp(`(^|[^A-Za-z0-9_-])${esc}($|[^A-Za-z0-9_-])`).test(text)
-}
-
-async function busy($: Engine): Promise<boolean> {
-  const now = await $.clock.now()
-  const w = (await read($, work)) ?? {}
-  const stale = Object.entries(w).filter(([, at]) => now - at > WORK_MAX_MS).map(([id]) => id)
-  if (stale.length) await untrack($, id => stale.includes(id))
-  if (Object.keys(w).length > stale.length) return true
-  try {
-    return (await $.agent.list()).some(a => AGENT_BUSY.has(a.status))
-  } catch {
-    return false
-  }
-}
-
-// Cheapest check first; the first that finds the session in use ends the tick: a rename or a turn
-// running (in memory), no level due yet (the clock), work in the background (the session's state,
-// then the agent list). Only then is the transcript read, to mark the name.
-async function tick($: Engine, st: Style): Promise<void> {
-  if (sleeping || (await read($, turning))) return
-  if (wakePending) return void serial($, () => unmark($, st))
-  const since = lastActivity
-  const idle = (await $.clock.now()) - since
-  const n = st.levels.filter(l => idle >= l.ms).length
-  if (n <= reached) return
-  // work in the background counts as activity: the idle time starts over
-  if (await busy($)) return active($)
-  await serial($, async () => {
-    // activity during the rename resets `reached`; the turn's end then takes the mark off again
-    let result = await sleep($, st, n)
-    // Renamed from the app since: no activity, so the new name gets the mark the idle time calls
-    // for, now. (A /rename typed in the session is activity, and the idle time starts over.)
-    if (result === 'renamed' && lastActivity === since) result = await sleep($, st, n)
-    if (result === 'done' && lastActivity === since) reached = n
-  })
-}
-
-// Activity: the idle time starts over. Kept in the store too (at most once a minute), so a restart
-// or a reload goes on counting from the real last activity.
-async function active($: Engine): Promise<void> {
-  const now = await $.clock.now()
-  lastActivity = now
-  reached = 0
-  if (now - savedAt < SAVE_MS) return
-  savedAt = now
-  await $.store.set(seenKey(await $.session.id()), now)
-}
-
-// ---- the topic ------------------------------------------------------------------------------
-
-// The model checks: when the last was, and how many in a row found nothing (each doubles the wait).
-// In the store, so a restart keeps the cap.
-type Asked = { at: number; misses: number }
-
-async function asked($: Engine, id: string): Promise<Asked> {
-  const v = (await $.store.get(`asked:${id}`)) as Partial<Asked> | undefined
-  return { at: typeof v?.at === 'number' ? v.at : 0, misses: typeof v?.misses === 'number' ? v.misses : 0 }
-}
-
-async function setAsked($: Engine, id: string, a: Asked): Promise<void> {
-  await $.store.set(`asked:${id}`, a)
-}
-
-// Runs `fn` after any rename in flight, as one: ticks skip and wake waits while it runs.
+// Runs `fn` after any rename in flight, as one: ticks skip while it runs.
 function serial($: Engine, fn: () => Promise<unknown>): Promise<void> {
   const prev = sleeping
   const p: Promise<void> = (async () => {
@@ -468,6 +379,95 @@ function serial($: Engine, fn: () => Promise<unknown>): Promise<void> {
     .finally(() => { if (sleeping === p) sleeping = undefined })
   sleeping = p
   return p
+}
+
+// ---- work in the background ----------------------------------------------------------------
+
+// A command, workflow or agent working in the background keeps the session from being idle. Agents
+// (subagents, teammates) are in $.agent.list(). Background commands and workflows have no such list:
+// they are the ones the conversation put in the background since this process started, less those
+// it has an end notice for (the notice names the task id) or that TaskStop stopped. The tool calls
+// seen while the session runs count too, in case the conversation's copy lacks a result. A Monitor
+// is a watch, not work, and doesn't count.
+export function startedTask(tool: string, result: unknown): string | null {
+  if (!result || typeof result !== 'object') return null
+  const r = result as Record<string, unknown>
+  if (tool === 'Bash' && typeof r.backgroundTaskId === 'string' && r.backgroundEndsWithFinalResponse !== true) return r.backgroundTaskId
+  if (tool === 'Workflow' && typeof r.taskId === 'string' && (r.status === 'async_launched' || r.status === 'remote_launched')) return r.taskId
+  return null
+}
+
+const TASK_ID = /<task-id>([^<]+)<\/task-id>/g
+
+// Whether a notice names the task id as a whole word ("b1" is not in "b12").
+export function mentions(text: string, id: string): boolean {
+  const esc = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`(^|[^A-Za-z0-9_-])${esc}($|[^A-Za-z0-9_-])`).test(text)
+}
+
+// The background tasks the conversation shows running: started from row `from` on, with no notice
+// of their end anywhere.
+export function runningTasks(messages: readonly { role: string; text: string; toolUses?: readonly { tool: string; result?: unknown }[] }[], from: number): Set<string> {
+  const started = new Set<string>()
+  const done = new Set<string>()
+  messages.forEach((m, i) => {
+    for (const u of m.toolUses ?? []) {
+      const id = startedTask(u.tool, u.result)
+      if (id && i >= from) started.add(id)
+      const stopped = u.tool === 'TaskStop' ? (u.result as { task_id?: unknown } | undefined)?.task_id : undefined
+      if (typeof stopped === 'string') done.add(stopped)
+    }
+    if (m.role === 'user') for (const x of m.text.matchAll(TASK_ID)) done.add(x[1]!.trim())
+  })
+  for (const id of done) started.delete(id)
+  return started
+}
+
+async function busy($: Engine): Promise<boolean> {
+  const now = await $.clock.now()
+  const gone = new Set((await read($, ended)) ?? [])
+  const live = Object.entries((await read($, work)) ?? {}).filter(([id, at]) => !gone.has(id) && now - at <= WORK_MAX_MS)
+  if (live.length) return true
+  try {
+    const running = runningTasks(await $.session.messages(), (await read($, origin)) ?? 0)
+    for (const id of gone) running.delete(id)
+    if (running.size) return true
+  } catch {}
+  try {
+    return (await $.agent.list()).some(a => AGENT_BUSY.has(a.status))
+  } catch {
+    return false
+  }
+}
+
+// ---- idle -----------------------------------------------------------------------------------
+
+function due(st: Style, idle: number): number {
+  return st.levels.filter(l => idle >= l.ms).length
+}
+
+async function active($: Engine): Promise<void> {
+  lastActivity = await $.clock.now()
+}
+
+// Once a minute, cheapest check first: a rename or a turn running, no level due by the activity
+// this process saw (the clock); then the transcript's own last activity, work in the background,
+// and only then the name, read right then and set to the levels due (nothing to rename when it
+// already has them).
+async function tick($: Engine, st: Style): Promise<void> {
+  if (sleeping || (await read($, turning))) return
+  if (wakePending) return void serial($, () => unmark($, st))
+  const now = await $.clock.now()
+  if (due(st, now - lastActivity) === 0) return
+  const t = await transcriptActivity($)
+  if (t !== null && t > lastActivity) lastActivity = Math.min(t, now)
+  const n = due(st, now - lastActivity)
+  if (n === 0) return
+  if (await busy($)) return active($)
+  const since = lastActivity
+  await serial($, async () => {
+    if (lastActivity === since) await render($, st, { level: n })
+  })
 }
 
 // The folders above a path, nearest first ('/a/b/f' -> '/a/b', '/a').
@@ -487,7 +487,7 @@ function baseName(dir: string): string {
 
 // A folder's name as a topic: cleaned like the model's answer; a dot folder is none.
 function folderTopic(name: string): string | null {
-  return name.startsWith('.') ? null : cleanTopic(name, null, 'last')
+  return name.startsWith('.') ? null : cleanTopic(name, null, 'last', maxWords)
 }
 
 const gitDirs = new Map<string, boolean>()
@@ -583,10 +583,10 @@ export function recentLines(messages: readonly { role: string; text: string }[])
   return out.reverse()
 }
 
-// The model's answer as a label: one line, letters, digits, '.', '_' and '-', two words at most
-// (`keep` says which two: a folder like "cc-mod-billing-api" says most in its last ones), and
+// The model's answer as a label: one line, letters, digits, '.', '_' and '-', `most` words at most
+// (`keep` says which: a folder like "cc-mod-billing-api" says most in its last ones), and
 // TOPIC_MAX_LEN characters at most. SAME keeps `current`. Null when nothing usable is left.
-export function cleanTopic(text: string, current: string | null, keep: 'first' | 'last' = 'first'): string | null {
+export function cleanTopic(text: string, current: string | null, keep: 'first' | 'last' = 'first', most = TOPIC_MAX_WORDS): string | null {
   const line = (text.trim().split('\n')[0] ?? '').trim().replace(/^["'`*]+|["'`*.]+$/g, '')
   if (/^same$/i.test(line)) return current
   const slug = line
@@ -595,7 +595,7 @@ export function cleanTopic(text: string, current: string | null, keep: 'first' |
     .replace(/-{2,}/g, '-')
     .replace(/^[-._]+|[-._]+$/g, '')
   const words = slug.split(/[-_]+/).filter(Boolean)
-  const two = (keep === 'last' ? words.slice(-TOPIC_MAX_WORDS) : words.slice(0, TOPIC_MAX_WORDS)).join('-')
+  const two = (keep === 'last' ? words.slice(-most) : words.slice(0, most)).join('-')
   const label = two.slice(0, TOPIC_MAX_LEN).replace(/[-._]+$/, '')
   return label === '' ? null : label
 }
@@ -609,8 +609,9 @@ async function askModel($: Engine, st: Style, current: string | null, lines: str
     'Recent messages:',
     ...lines,
     '',
-    'Give one short label for what this session is working on now: one word, or two joined by a',
-    'hyphen, like "billing-api" or "docs-site". If the current label still fits, reply SAME.',
+    maxWords === 1
+      ? 'Give one short label for what this session is working on now: a single word, like "billing" or "docs". If the current label still fits, reply SAME.'
+      : 'Give one short label for what this session is working on now: one word, or two joined by a hyphen, like "billing-api" or "docs-site". If the current label still fits, reply SAME.',
   ].join('\n')
   let r: Awaited<ReturnType<Engine['model']['complete']>>
   try {
@@ -623,76 +624,97 @@ async function askModel($: Engine, st: Style, current: string | null, lines: str
     $.ui.log(`nametag: topic: ${'reason' in r ? String(r.reason) : 'no answer'}`, { to: 'debug' })
     return null
   }
-  return cleanTopic(r.text, current)
+  return cleanTopic(r.text, current, 'first', maxWords)
 }
 
-// The person's name under the mod's, and the topic now on it, read in step with the renames. A
-// name the mod didn't set is the person's (renamed from the app, say): the base from now on. Null:
-// unnamed or unreadable.
-async function named($: Engine, st: Style, id: string): Promise<{ base: string; current: string | null } | null> {
+
+// ---- the topic ------------------------------------------------------------------------------
+
+// /topic off or on: the last such command in the transcript. Off only when it says so.
+export function lastTopicCommand(rows: string): boolean | null {
+  let off: boolean | null = null
+  for (const l of rows.split('\n')) {
+    if (!l.includes(TOPIC_ROW)) continue
+    const m = /<command-args>\s*(\w+)/.exec(l)
+    if (m?.[1] === 'off') off = true
+    else if (m?.[1] === 'on') off = false
+  }
+  return off
+}
+
+async function readTopicOff($: Engine): Promise<boolean> {
+  const end = await transcriptEnd($)
+  if (!end) return false
+  const rows = end.whole ? end.text : await rowsWith($, end.path, TOPIC_ROW)
+  return rows ? (lastTopicCommand(rows) ?? false) : false
+}
+
+// The last model check, the one thing kept between runs: so a restart can't ask again sooner.
+function askedKey(id: string): string {
+  return `asked:${id}`
+}
+
+// Drops everything in the store but the last model checks of the last KEEP_DAYS (and so whatever
+// an earlier version kept).
+async function prune($: Engine): Promise<void> {
+  const cutoff = (await $.clock.now()) - KEEP_DAYS * 24 * 60 * 60 * 1000
+  for (const key of await $.store.keys()) {
+    const v = await $.store.get(key)
+    if (!key.startsWith('asked:') || typeof v !== 'number' || v < cutoff) await $.store.delete(key)
+  }
+}
+
+// The person's name under the mark and the topic now on it, read right then. Null: unnamed or unreadable.
+async function named($: Engine, st: Style): Promise<{ base: string; current: string | null } | null> {
   let out: { base: string; current: string | null } | null = null
   await serial($, async () => {
     const name = await currentName($)
     if (!name || name.trim() === '') return
-    const mine = await record($, id)
-    if (mine && mine.set !== name) {
-      await dropRecord($, id)
-      reached = 0 // the next tick marks the new name as the idle time calls for
-      out = { base: name, current: null }
-      return
-    }
-    out = { base: mine ? mine.base : name, current: mine?.topic ?? null }
+    const d = decompose(name, st)
+    out = { base: d.base, current: d.topic }
   })
   return out
 }
 
-// Puts `topic` on the name as it is then (a name the person gave meanwhile included). Turn's end or
-// a start: the mark is whatever is on the name now.
 function setTopic($: Engine, st: Style, topic: string): Promise<void> {
-  return serial($, async () => {
-    await render($, st, { topic })
-  })
+  return serial($, () => render($, st, { topic }))
 }
 
 // When the session starts and at the end of each turn of the main conversation, cheapest test
-// first, from the conversation as it is now. The paths first: when one project leads them, it is the
-// topic, with no model call. Otherwise the model, once the person has written a couple of prompts and
-// 10 minutes have passed since its last check; a check that found nothing (the model failed, or only
-// gave the name back) doubles the wait, up to 2 hours.
+// first, from the conversation as it is then. The paths first: when one project leads them, it is
+// the topic, with no model call. Otherwise the model, once the person has written a couple of
+// prompts and 10 minutes have passed since its last check; a check that found nothing (the model
+// failed, or only gave the name back) doubles the wait, up to 2 hours.
 async function topicTurn($: Engine, st: Style): Promise<void> {
-  if (!st.topic || !interactive) return
-  const id = await $.session.id()
-  if (await topicOff($, id)) return
+  if (!st.topic || !interactive || topicOff) return
   const project = await pathLeader($)
-
   if (project !== null) {
-    if (((await record($, id))?.topic ?? null) === project) return // the record alone: no name read
-    const n = await named($, st, id)
+    const n = await named($, st)
     if (!n || n.current === project || inName(n.base, project)) return
     await setTopic($, st, project)
     return
   }
-
+  const id = await $.session.id()
   const now = await $.clock.now()
-  const a = await asked($, id)
-  const since = a.at === 0 || a.at > now ? Infinity : now - a.at
-  if (since < Math.min(TOPIC_RATE_MS * 2 ** a.misses, TOPIC_MAX_WAIT_MS)) return
+  const at = await $.store.get(askedKey(id))
+  const since = typeof at !== 'number' || at > now ? Infinity : now - at
+  if (since < Math.min(TOPIC_RATE_MS * 2 ** misses, TOPIC_MAX_WAIT_MS)) return
   const lines = recentLines(await $.session.messages())
   if (lines.filter(l => l.startsWith('User: ')).length < TOPIC_MIN_PROMPTS) return // too little to go on
-  const n = await named($, st, id)
+  const n = await named($, st)
   if (!n) return // no model call
-  await setAsked($, id, { at: now, misses: a.misses })
-  let topic = await askModel($, st, n.current, lines)
-  if (topic && inName(n.base, topic)) topic = null
-  if (!topic) return setAsked($, id, { at: now, misses: a.misses + 1 })
-  await setAsked($, id, { at: now, misses: 0 })
-  if (topic !== n.current) await setTopic($, st, topic)
+  await $.store.set(askedKey(id), now)
+  let label = await askModel($, st, n.current, lines)
+  if (label && inName(n.base, label)) label = null
+  misses = label ? 0 : misses + 1
+  if (label && label !== n.current) await setTopic($, st, label)
 }
 
 // ---- hooks ---------------------------------------------------------------------------------
 
 export const register: Register = (on, options) => {
   const st = style(options)
+  maxWords = options.topic_words === 2 ? 2 : 1
 
   on('session.start', async ($, e, next) => {
     const r = await next(e)
@@ -701,27 +723,22 @@ export const register: Register = (on, options) => {
     interactive = e.isInteractive
     if (!e.isInteractive) return r
     await prune($).catch(err => $.ui.log(`nametag: ${err}`, { to: 'debug' }))
-    // A start (restart, resume, reload) is not activity: the idle time runs on from the last
-    // activity the store saw, and the name gets the mark that time calls for right away, no more and
-    // no less. A session the store hasn't seen starts its idle time now. Not awaited: a rename waits
-    // for a running turn; ticks skip and wake waits while it runs.
+    // A start (restart, resume, reload) is not activity: the idle time runs from the transcript's
+    // last activity, and the name gets the levels that time calls for right away, no more and no
+    // less. A session with no activity yet starts counting now. Not awaited: a rename waits for a
+    // running turn; ticks skip while it runs.
     const now = await $.clock.now()
-    const seen = await $.store.get(seenKey(await $.session.id()))
-    savedAt = 0
-    if (typeof seen === 'number' && seen <= now) {
-      lastActivity = seen
-      savedAt = seen
-      reached = 0
-    } else await active($)
-    const since = lastActivity
-    // A reload in the middle of a turn: that turn is activity, and its end takes any mark off.
-    const n = (await read($, turning)) ? 0 : st.levels.filter(l => now - since >= l.ms).length
-    void serial($, async () => {
-      if (n === 0) return unmark($, st)
-      if ((await render($, st, { level: n })) === 'done' && lastActivity === since) reached = n
-    })
-    // the topic from the conversation as it stands, right away
+    const t = await transcriptActivity($).catch(() => null)
+    lastActivity = t !== null && t <= now ? t : now
+    if ((await read($, origin)) === null) {
+      // a restart: tasks started before it died with the process that ran them
+      const rows = await $.session.messages().then(m => m.length, () => 0)
+      await update($, origin, () => rows)
+    }
+    const n = (await read($, turning)) ? 0 : due(st, now - lastActivity)
+    void serial($, () => (n === 0 ? unmark($, st) : render($, st, { level: n })))
     if (st.topic) {
+      topicOff = await readTopicOff($).catch(() => false)
       await $.command.register({ name: 'topic', description: 'nametag: turn the topic at the end of this session\'s name off or on', argumentHint: 'off | on' }).catch(err => $.ui.log(`nametag: ${err}`, { to: 'debug' }))
       topicTurn($, st).catch(err => $.ui.log(`nametag: ${err}`, { to: 'debug' }))
     }
@@ -737,56 +754,53 @@ export const register: Register = (on, options) => {
   // notice of its end names its task id.
   on('prompt.submit', async ($, e, next) => {
     if (e.origin?.kind !== 'plugin') await active($)
-    if (e.origin?.kind === 'task-notification') await untrack($, id => mentions(e.text, id))
+    if (e.origin?.kind === 'task-notification') {
+      const ids = [...e.text.matchAll(TASK_ID)].map(x => x[1]!.trim())
+      for (const id of Object.keys((await read($, work)) ?? {})) if (mentions(e.text, id)) ids.push(id)
+      if (ids.length) await update($, ended, g => [...(g ?? []), ...ids])
+    }
     return next(e)
   }).catch(($, e, next) => next(e))
 
   // `/topic off` / `/topic on`, for this session. Not awaited: the rename waits for the session to be idle.
   on('command.run', { command: 'topic' }, async ($, e) => {
-    const id = await $.session.id()
     const arg = e.args.trim().toLowerCase()
     if (arg === 'off') {
-      await $.store.set(offKey(id), await $.clock.now())
+      topicOff = true
       void serial($, () => render($, st, { topic: null }))
       return { text: 'nametag: no topic for this session (/topic on to bring it back)' }
     }
     if (arg === 'on') {
-      await $.store.delete(offKey(id))
-      await setAsked($, id, { at: 0, misses: 0 })
+      topicOff = false
+      misses = 0
+      await $.store.delete(askedKey(await $.session.id()))
       topicTurn($, st).catch(err => $.ui.log(`nametag: ${err}`, { to: 'debug' }))
       return { text: 'nametag: topic on for this session' }
     }
-    return { text: `nametag: topic is ${(await topicOff($, id)) ? 'off' : 'on'} for this session; /topic off or /topic on` }
+    return { text: `nametag: topic is ${topicOff ? 'off' : 'on'} for this session; /topic off or /topic on` }
   })
 
-  // The person renames the session: their name stands, and the mark and topic are built on it from
-  // the next check. The record goes once the name is no longer the mod's (the rename went through).
-  // Not awaited: it waits for any rename of the mod's in flight, which may wait for this command.
+  // The person renames the session: a command typed in the session, so activity. Their name is
+  // built on from the next check.
   on('command.run', async ($, e, next) => {
     if (e.command !== 'rename' || e.origin?.kind === 'plugin') return next(e)
     personRenames++
     personName = e.args.trim()
-    await active($) // the person is here: their new name is marked after a full idle spell
-    const r = await next(e)
-    void serial($, async () => {
-      const id = await $.session.id()
-      const mine = await record($, id)
-      const name = await currentName($)
-      if (mine && name !== undefined && name !== mine.set) await dropRecord($, id)
-    })
-    return r
+    await active($)
+    return next(e)
   }).catch(($, e, next) => next(e))
 
-  // Work put in the background, in any agent's loop.
+  // Work put in the background or stopped, in any agent's loop, as it happens.
   on('tool.call', async ($, e, next) => {
     const r = await next(e)
     try {
       if (!('deny' in r && r.deny !== undefined) && !r.isError) {
         const id = startedTask(e.tool, r.result)
-        if (id) await track($, id)
+        const now = await $.clock.now()
+        if (id) await update($, work, w => ({ ...(w ?? {}), [id]: now }))
         if (e.tool === 'TaskStop') {
           const stopped = (r.result as { task_id?: unknown } | undefined)?.task_id
-          if (typeof stopped === 'string') await untrack($, id => id === stopped)
+          if (typeof stopped === 'string') await update($, ended, g => [...(g ?? []), stopped])
         }
       }
     } catch (err) {

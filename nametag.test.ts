@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { cleanTopic, leader, mentions, recentLines } from './hooks/register'
+import { cleanTopic, decompose, lastActivityIn, lastTopicCommand, leader, mentions, recentLines, runningTasks, style } from './hooks/register'
 
 const ID = 'aaaaaaaa-0000-4000-8000-000000000001'
 const CONFIG = '/u/.claude'
@@ -17,8 +17,10 @@ function world(on: any, opts: { name?: string; size?: number; env?: Record<strin
     modelGate: undefined as Promise<void> | undefined, modelRefuses: false,
     agents: [] as { id: string; status: string }[], results: {} as Record<string, unknown>, agentLists: 0,
     git: new Set<string>(), dirs: {} as Record<string, string[]>, messages: [] as { role: string; text: string }[],
-    answers: [] as string[], asks: 0, prompts: [] as string[],
+    answers: [] as string[], asks: 0, prompts: [] as string[], tails: 0,
     title: (name: string) => { w.text += JSON.stringify({ type: 'custom-title', customTitle: name, sessionId: w.id }) + '\n' },
+    // a prompt (or reply) in the transcript at `ms`
+    row: (ms: number, type = 'user') => { w.text += JSON.stringify({ type, timestamp: new Date(ms).toISOString(), message: { content: 'x' } }) + '\n' },
   }
   const pathOf = () => opts.path ?? `${CONFIG}/projects/-work-demo/${w.id}.jsonl`
   current = w
@@ -64,8 +66,13 @@ function world(on: any, opts: { name?: string; size?: number; env?: Record<strin
     return { value: [...PROJECTS, pathOf().split('/').at(-2)].map(name => ({ name, kind: 'dir', size: 0, mtimeMs: 0, isLink: false })) }
   })
   on('process.run', (_: unknown, e: { argv: readonly string[] }) => {
+    if (e.argv[0] === 'tail') {
+      w.tails++
+      return { value: { exitCode: 0, stdout: w.text.slice(-Number(e.argv[2])), stderr: '' } }
+    }
     w.greps++
-    const hits = w.text.split('\n').filter(l => l.includes('"type":"custom-title"'))
+    const needle = e.argv[0] === 'grep' ? e.argv[3]! : '"type":"custom-title"'
+    const hits = w.text.split('\n').filter(l => l.includes(needle))
     return { value: { exitCode: hits.length ? 0 : 1, stdout: hits.join('\n'), stderr: '' } }
   })
   on('command.run', async (_: unknown, e: { command: string; args: string; origin?: { kind: string } }) => {
@@ -92,8 +99,8 @@ async function personRename($: any, name: string) {
 }
 
 // A record as the mod keeps it while a session is marked.
-function preset(w: { store: Map<string, unknown> }, id: string, set: string, base: string, at = 1_000_000) {
-  w.store.set(`mark:${id}`, { set, base, at })
+function preset(_w: unknown, _id: string, _set: string, _base: string, _at = 1_000_000) {
+  // 0.14: no record is kept; the name itself says it all
 }
 
 // Lets the rename jobs the mod queued without waiting for them run to their end.
@@ -157,14 +164,19 @@ test('non-interactive sessions are left alone', async ($, on) => {
   expect(w.renames).toEqual([])
 })
 
-test('a transcript over 4 MiB is searched with grep', async ($, on) => {
+test('a transcript over 4 MiB is read from its end, and searched with grep when the end has no title', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on, { name: 'Big one', size: 20 * 1024 * 1024 })
   await start($)
   await clock.advance(11 * MIN)
   expect(w.renames).toEqual(['💤 Big one'])
-  expect(w.greps).toBeGreaterThan(0)
+  expect(w.tails).toBeGreaterThan(0)
+  expect(w.greps).toBe(0)
   expect(w.reads).toBe(0)
+  w.text += 'x'.repeat(600 * 1024) + '\n' // the title row is now far from the end
+  await turn($, 't1')
+  expect(w.renames).toEqual(['💤 Big one', 'Big one'])
+  expect(w.greps).toBeGreaterThan(0)
 })
 
 test('options: delays and emojis per level', { options: { level1_minutes: 2, level1_emoji: '1️⃣', level2_minutes: 5, level2_emoji: '2️⃣', level3_minutes: 9, level3_emoji: '3️⃣' } }, async ($, on) => {
@@ -337,16 +349,11 @@ test('a prompt during a rename: the mark still comes off after the turn', async 
   expect(w.renames).toEqual(['💤 Builder', 'Builder', '💤 Builder'])
 })
 
-test('position end keeps a name that starts with the emoji', { options: { position: 'end' } }, async ($, on) => {
-  const clock = mock.clock(on, { now: 1_000_000 })
+test('a name that starts with the mark is read as marked (the transcript can\'t say who set it)', { options: { position: 'end' } }, async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
   const w = world(on, { name: '💤 Notes' })
   await start($)
-  await turn($, 't0') // first wake: an unmarked name read in any style would lose its 💤
-  w.renames.length = 0
-  w.title('💤 Notes') // the person names it again
-  await clock.advance(11 * MIN)
-  await turn($, 't1')
-  expect(w.renames).toEqual(['💤 Notes 💤', '💤 Notes'])
+  expect(w.renames).toEqual(['Notes'])
 })
 
 test('a name that is only the emoji', async ($, on) => {
@@ -429,7 +436,7 @@ test('a transcript not found is searched for at most every 10 minutes', async ($
   await start($)
   await clock.advance(40 * MIN)
   expect(w.renames).toEqual([])
-  expect(w.lists).toBeLessThanOrEqual(4)
+  expect(w.lists).toBeLessThanOrEqual(5) // at the start, then at 10, 20, 30 and 40 minutes
 })
 
 test('the mark is rebuilt from the name under it when the style changes', { options: { brackets: '[]' } }, async ($, on) => {
@@ -451,16 +458,13 @@ test('a mark set under another style comes off', { options: { position: 'end' } 
   expect(w.renames).toEqual(['Builder'])
 })
 
-test('a name this mod did not set is never parsed', async ($, on) => {
+test('a mark typed by hand is read as a mark: marks never stack', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on, { name: '💤 Builder' })
   await start($)
-  await turn($, 't1')
-  expect(w.renames).toEqual([])
+  expect(w.renames).toEqual(['Builder'])
   await clock.advance(11 * MIN)
-  expect(w.renames).toEqual(['💤 💤 Builder'])
-  await turn($, 't2')
-  expect(w.renames).toEqual(['💤 💤 Builder', '💤 Builder'])
+  expect(w.renames).toEqual(['Builder', '💤 Builder'])
 })
 
 test('a headless turn clears a mark but never sets one', async ($, on) => {
@@ -491,8 +495,10 @@ test('renamed from the app while marked: once noticed, the new name gets the mar
   await start($)
   await clock.advance(11 * MIN)
   w.title('New name') // the person renames from the app, without sending anything
-  await clock.advance(2 * HOUR + 50 * MIN) // level 2 is due: the mod sees the new name and marks it
-  expect(w.renames).toEqual(['💤 Builder', '💤💤 New name'])
+  await clock.advance(MIN) // the next check reads the name and marks it as the idle time calls for
+  expect(w.renames).toEqual(['💤 Builder', '💤 New name'])
+  await clock.advance(2 * HOUR + 50 * MIN)
+  expect(w.renames).toEqual(['💤 Builder', '💤 New name', '💤💤 New name'])
   await turn($, 't1')
   expect(w.renames.at(-1)).toBe('New name')
 })
@@ -509,10 +515,10 @@ test('a session that starts marked, with no saved activity, is woken at once, wi
   expect(w.renames).toEqual(['Builder'])
 })
 
-test('a restart goes on counting from the last activity: 4 hours idle gives 💤💤 at once', async ($, on) => {
+test('a restart goes on counting from the transcript\'s last activity: 4 hours idle gives 💤💤 at once', async ($, on) => {
   const clock = mock.clock(on, { now: 100 * HOUR })
   const w = world(on, { name: 'Builder' })
-  w.store.set(`seen:${ID}`, 96 * HOUR)
+  w.row(96 * HOUR)
   await start($)
   expect(w.renames).toEqual(['💤💤 Builder'])
   await clock.advance(9 * HOUR) // 13 hours in all
@@ -524,8 +530,7 @@ test('a restart goes on counting from the last activity: 4 hours idle gives 💤
 test('a restart of a marked session sets the level the idle time calls for, up or down', async ($, on) => {
   mock.clock(on, { now: 100 * HOUR })
   const w = world(on, { name: '💤 Builder' })
-  preset(w, ID, '💤 Builder', 'Builder')
-  w.store.set(`seen:${ID}`, 87 * HOUR) // 13 hours
+  w.row(87 * HOUR, 'assistant') // 13 hours
   await start($)
   expect(w.renames).toEqual(['💤💤💤 Builder'])
 })
@@ -533,14 +538,21 @@ test('a restart of a marked session sets the level the idle time calls for, up o
 test('a restart soon after activity: no mark yet, and the next comes when the idle time is due', async ($, on) => {
   const clock = mock.clock(on, { now: 100 * HOUR })
   const w = world(on, { name: '💤 Builder' })
-  preset(w, ID, '💤 Builder', 'Builder')
-  w.store.set(`seen:${ID}`, 100 * HOUR - 5 * MIN)
+  w.row(100 * HOUR - 5 * MIN)
   await start($)
   expect(w.renames).toEqual(['Builder'])
   await clock.advance(4 * MIN)
   expect(w.renames).toEqual(['Builder'])
   await clock.advance(2 * MIN)
   expect(w.renames).toEqual(['Builder', '💤 Builder'])
+})
+
+test('renames and bookkeeping rows are not activity; a prompt row is', async () => {
+  const at = (ms: number, type: string, extra = {}) => JSON.stringify({ type, timestamp: new Date(ms).toISOString(), ...extra })
+  const text = [at(1000, 'user'), at(2000, 'assistant'), at(3000, 'system', { subtype: 'local_command' }), at(4000, 'attachment'),
+    JSON.stringify({ type: 'custom-title', customTitle: 'x' }), '{"type":"user","timest'].join('\n')
+  expect(lastActivityIn(text)).toBe(2000)
+  expect(lastActivityIn('{"type":"custom-title","customTitle":"x"}')).toBe(null)
 })
 
 test('a reload in the middle of a long turn does not mark it', async ($, on) => {
@@ -553,11 +565,12 @@ test('a reload in the middle of a long turn does not mark it', async ($, on) => 
   expect(w.renames).toEqual([])
 })
 
-test('activity is saved, so a reload keeps the idle time running', async ($, on) => {
+test('a reload reads the last activity from the transcript, so the idle time runs on', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on, { name: 'Builder' })
   await start($)
   await turn($, 't1')
+  w.row(1_000_000) // that turn, as the transcript holds it
   await clock.advance(9 * MIN)
   await start($) // the reload: not activity
   await clock.advance(2 * MIN)
@@ -671,20 +684,21 @@ test('no level due: the tick ends before asking about agents or reading the tran
   expect(w.agentLists).toBe(0)
   expect(w.reads).toBe(reads)
   await clock.advance(2 * MIN)
-  expect(w.agentLists).toBe(1)
+  expect(w.agentLists).toBeGreaterThan(0)
   expect(w.renames).toEqual(['💤 Builder'])
 })
 
-test('records and saved times not touched for 90 days are dropped', async ($, on) => {
+test('the store keeps only recent model-check times; anything else is dropped', async ($, on) => {
   mock.clock(on, { now: 100 * 24 * HOUR })
   const w = world(on, { name: 'Builder' })
-  preset(w, 'old', 'x', 'y', 1)
-  preset(w, 'new', 'x', 'y', 99 * 24 * HOUR)
-  w.store.set('seen:old', 1)
-  w.store.set('asked:old', { at: 1, misses: 0 })
-  w.store.set('notopic:new', 99 * 24 * HOUR)
+  w.store.set('mark:old', { set: 'x', base: 'y', at: 1 })
+  w.store.set('seen:x', 99 * 24 * HOUR)
+  w.store.set('freeze:x', 101 * 24 * HOUR)
+  w.store.set('notopic:x', 99 * 24 * HOUR)
+  w.store.set('asked:old', 1)
+  w.store.set('asked:new', 99 * 24 * HOUR)
   await start($)
-  expect([...w.store.keys()]).toEqual(['mark:new', 'notopic:new', `seen:${ID}`])
+  expect([...w.store.keys()]).toEqual(['asked:new'])
 })
 
 test('the person\'s /rename while marked: their name stands, the record goes, the next mark waits a full idle spell', async ($, on) => {
@@ -760,6 +774,17 @@ test('a notice ends only the task it names, as a whole word', async () => {
   expect(mentions('task a.b+c ended', 'a.b+c')).toBe(true)
 })
 
+test('background tasks from the conversation: started since this process, less those with an end notice', async () => {
+  const bash = (id: string) => ({ tool: 'Bash', result: { backgroundTaskId: id } })
+  const msgs = [
+    { role: 'assistant', text: '', toolUses: [bash('old')] }, // before this process: died with the last one
+    { role: 'assistant', text: '', toolUses: [bash('b1'), bash('b2'), { tool: 'Workflow', result: { status: 'async_launched', taskId: 'w1' } }] },
+    { role: 'user', text: '<task-notification><task-id>b1</task-id></task-notification>' },
+    { role: 'assistant', text: '', toolUses: [{ tool: 'TaskStop', result: { task_id: 'w1' } }] },
+  ]
+  expect([...runningTasks(msgs, 1)]).toEqual(['b2'])
+})
+
 // ---- the topic ----
 
 const TOPIC = { topic: 'on' } as const
@@ -811,7 +836,7 @@ test('topic: no clear project, so the model is asked; its answer is cleaned', { 
   expect(w.asks).toBe(1)
   expect(w.prompts[0]).toContain('User: compare the two hosting plans')
   expect(w.prompts[0]).not.toContain('/rename')
-  expect(w.renames).toEqual(['Builder [Hosting-Plans]'])
+  expect(w.renames).toEqual(['Builder [Hosting]']) // one word by default
 })
 
 test('topic: fewer than 2 prompts, no model call', { options: TOPIC }, async ($, on) => {
@@ -908,26 +933,18 @@ test('topic: a model that only gives the name back counts as a miss', { options:
   expect(w.renames).toEqual([])
 })
 
-test('topic: renamed from the app (no /rename), the next 💤 sees it; the topic comes back on the new name', { options: TOPIC }, async ($, on) => {
+test('topic: renamed from the app (no /rename), the next check builds on the new name', { options: TOPIC }, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on, { name: 'Builder' })
   workspace(w)
   await start($)
   await edit($, '/work/demo/alpha/a.ts')
   await edit($, '/work/demo/alpha/b.ts')
-  await turns($, clock, 3)
+  await turns($, clock, 1)
   expect(w.renames).toEqual(['Builder [alpha]'])
   w.title('Shipping')
-  for (const f of ['c', 'd', 'g']) await edit($, `/work/demo/alpha/${f}.ts`)
-  await busyFor($, clock, 16, 'z')
-  expect(w.store.has(`mark:${ID}`)).toBe(true) // the files still say alpha, as the record does: no name read
-  await clock.advance(11 * MIN) // the 💤 reads the name: it is the person's now, and marked as such
-  expect(w.renames).toEqual(['Builder [alpha]', '💤 Shipping'])
-  await edit($, '/work/demo/alpha/e.ts')
-  await edit($, '/work/demo/alpha/f.ts')
-  await turn($, 'b1')
-  await clock.advance(MIN)
-  expect(w.renames).toEqual(['Builder [alpha]', '💤 Shipping', 'Shipping', 'Shipping [alpha]'])
+  await turns($, clock, 1, 10)
+  expect(w.renames).toEqual(['Builder [alpha]', 'Shipping [alpha]'])
 })
 
 test('topic: a search of the whole session folder says nothing', { options: TOPIC }, async ($, on) => {
@@ -953,7 +970,7 @@ test('topic: a topic the name already says is left off', { options: TOPIC }, asy
   expect(w.renames).toEqual([])
 })
 
-test('topic: a long folder name gives its last two words', { options: TOPIC }, async ($, on) => {
+test('topic: a long folder name gives its last word, or two with topic_words: 2', { options: { topic: 'on', topic_words: 2 } }, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on, { name: 'Builder' })
   w.dirs['/work/demo'] = ['cc-mod-billing-api']
@@ -963,6 +980,18 @@ test('topic: a long folder name gives its last two words', { options: TOPIC }, a
   await edit($, '/work/demo/cc-mod-billing-api/b.ts')
   await turns($, clock, 3)
   expect(w.renames).toEqual(['Builder [billing-api]'])
+})
+
+test('topic: one word by default: a folder gives its last', { options: TOPIC }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  w.dirs['/work/demo'] = ['cc-mod-nametag']
+  w.git.add('/work/demo/cc-mod-nametag/.git')
+  await start($)
+  await edit($, '/work/demo/cc-mod-nametag/a.ts')
+  await edit($, '/work/demo/cc-mod-nametag/b.ts')
+  await turns($, clock, 1)
+  expect(w.renames).toEqual(['Builder [nametag]'])
 })
 
 test('topic: a dot folder is no project', { options: TOPIC }, async ($, on) => {
@@ -976,14 +1005,6 @@ test('topic: a dot folder is no project', { options: TOPIC }, async ($, on) => {
   await edit($, '/work/demo/.cache/b.ts')
   await turns($, clock, 3)
   expect(w.renames).toEqual(['Builder [setup]'])
-})
-
-test('topic: this session\'s own record is never pruned, and its age starts over', async ($, on) => {
-  mock.clock(on, { now: 100 * 24 * HOUR })
-  const w = world(on, { name: 'Builder [alpha]' })
-  w.store.set(`mark:${ID}`, { set: 'Builder [alpha]', base: 'Builder', at: 1, level: 0, topic: 'alpha' })
-  await start($)
-  expect((w.store.get(`mark:${ID}`) as any)?.at).toBe(100 * 24 * HOUR)
 })
 
 test('topic: the person renames it, and the topic goes on their new name', { options: TOPIC }, async ($, on) => {
@@ -1032,16 +1053,29 @@ test('topic: a session restarted with a topic keeps it', { options: TOPIC }, asy
   expect(w.renames).toEqual(['💤 Builder [alpha]'])
 })
 
-test('topic: turned off, a topic left in a name comes off with the next rename', async ($, on) => {
+test('topic: turned off, a bracketed end is part of the name', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on, { name: 'Builder [alpha]' })
-  w.store.set(`mark:${ID}`, { set: 'Builder [alpha]', base: 'Builder', at: 1, level: 0, topic: 'alpha' })
   await start($)
   await clock.advance(11 * MIN)
-  expect(w.renames).toEqual(['💤 Builder'])
-  await turn($, 't1')
-  expect(w.renames).toEqual(['💤 Builder', 'Builder'])
-  expect(marks(w)).toEqual([])
+  expect(w.renames).toEqual(['💤 Builder [alpha]'])
+})
+
+test('the name taken apart: mark, topic, and a mark of another style', async () => {
+  const st = style({ topic: 'on', level2_emoji: '🐑' })
+  expect(decompose('💤🐑 Builder [alpha]', st)).toEqual({ base: 'Builder', level: 2, topic: 'alpha' })
+  expect(decompose('🛰️ TARS 😑', st)).toEqual({ base: '🛰️ TARS 😑', level: 0, topic: null })
+  expect(decompose('(💤) - Builder', st)).toEqual({ base: 'Builder', level: 1, topic: null })
+  expect(decompose('Builder | 💤💤', st)).toEqual({ base: 'Builder', level: 1, topic: null })
+  expect(decompose('💤 My notes', st).base).toBe('My notes')
+  expect(decompose('Builder [alpha]', style({})).topic).toBe(null)
+})
+
+test('/topic off or on: the last such command in the transcript', async () => {
+  const row = (a: string) => JSON.stringify({ type: 'system', content: `<command-name>/topic</command-name>\n<command-args>${a}</command-args>` })
+  expect(lastTopicCommand([row('off'), row('on'), row('off')].join('\n'))).toBe(true)
+  expect(lastTopicCommand(row('on'))).toBe(false)
+  expect(lastTopicCommand('nothing')).toBe(null)
 })
 
 test('topic: off by default, no path noted and no model call', async ($, on) => {

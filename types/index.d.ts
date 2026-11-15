@@ -1,25 +1,20 @@
-// What nametag keeps.
+// What nametag keeps. Nothing on disk but each session's last model check for a topic, in the mod's
+// store under "asked:<session id>" (ms since epoch), forgotten after 90 days.
 //
-// In the session's state (it outlives a hot reload of the mod):
+// In the session's memory (it outlives a hot reload of the mod, not a restart):
 //   transcript: this session's transcript, once found
-//   work: background commands and workflows still running, task id -> when started (ms)
+//   work: background commands and workflows seen starting while this process runs, task id -> when (ms)
+//   ended: task ids seen ending (a notice, TaskStop) while this process runs
 //   inTurn: a turn of the main conversation is running
-//   record: this session's record (below) as last written, so another session's store write can't lose it
-//
-// In the mod's store (it outlives restarts), under "mark:<session id>", while the name is one the mod
-// built (marked, or with a topic):
-//   set: the name this mod set; base: the person's name under it; at: when (ms since epoch);
-//   level: how many levels of the mark it carries (absent in records of 0.7 and earlier: marked);
-//   topic: the topic at its end, or null
-// Also "seen:<session id>": when it last had activity (ms); "asked:<session id>": { at, misses } of
-// the model checks for a topic; "notopic:<session id>": when /topic off was given.
-export type Mark = { set: string; base: string; at: number; level?: number; topic?: string | null }
+//   from: how many rows the conversation had when this process started (-1: none yet)
 
 declare module 'claude-code' {
   interface PluginState {
     'nametag': {
-      transcript: string | null; work: Record<string, number> | null
-      inTurn: boolean | null; record: { id: string; mark: Mark | null } | null
+      transcript: string | null; work: Record<string, number> | null; ended: string[] | null
+      inTurn: boolean | null; from: number | null
     }
   }
 }
+
+export type TaskIds = string[]
