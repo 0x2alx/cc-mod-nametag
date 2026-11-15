@@ -1,5 +1,7 @@
-// What nametag keeps. Nothing on disk but each session's last model check for a topic, in the mod's
-// store under "asked:<session id>" (ms since epoch), forgotten after 90 days.
+// What nametag keeps on disk, in the mod's store: each session's last model check for a topic under
+// "asked:<session id>" (ms since epoch), forgotten after 90 days; the mark and topic options it ran
+// with under "styles", newest first, at most five. While a name is marked, <config>/nametag/wake/
+// <session id> for the optional wake hook.
 //
 // In the session's memory (it outlives a hot reload of the mod, not a restart):
 //   transcript: this session's transcript, once found

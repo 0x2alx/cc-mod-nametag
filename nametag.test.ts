@@ -102,7 +102,7 @@ function world(on: any, opts: { name?: string; size?: number; env?: Record<strin
 
 // The store's keys other than the saved last activity.
 function marks(w: { store: Map<string, unknown> }) {
-  return [...w.store.keys()].filter(k => !k.startsWith('seen:'))
+  return [...w.store.keys()].filter(k => !k.startsWith('seen:') && k !== 'styles')
 }
 
 // The person types /rename.
@@ -744,7 +744,36 @@ test('the store keeps only recent model-check times; anything else is dropped', 
   w.store.set('asked:old', 1)
   w.store.set('asked:new', 99 * 24 * HOUR)
   await start($)
-  expect([...w.store.keys()]).toEqual(['asked:new'])
+  expect([...w.store.keys()].sort()).toEqual(['asked:new', 'styles'])
+})
+
+test('options changed: a mark set under the old ones comes off exactly, not stacked, and the name\'s own emoji stays', { options: { brackets: '()', level1_emoji: '🫪', level2_emoji: '🫪', level3_emoji: '🫪' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: 10 * HOUR })
+  const w = world(on, { name: '(😴🫪) 🚀 Cortana' })
+  w.row(10 * HOUR - 40 * MIN) // idle 40 minutes: one level (the second is at 3 hours)
+  // what the store held from the start before, under the old options
+  w.store.set('styles', [{ emojis: ['😴', '🫪', '🫪'], atEnd: false, sep: '', open: '(', close: ')', topic: false, topicSep: '·', topicOpen: '', topicClose: '' }])
+  await start($)
+  expect(w.renames).toEqual(['(🫪) 🚀 Cortana'])
+  expect((w.store.get('styles') as any[]).map(x => x.emojis.join(''))).toEqual(['🫪🫪🫪', '😴🫪🫪'])
+  await clock.advance(MIN)
+  expect(w.renames).toEqual(['(🫪) 🚀 Cortana'])
+})
+
+test('options changed: a name the person gave, starting with an emoji, under a mark of the old options', { options: { level1_emoji: '😴' } }, async ($, on) => {
+  mock.clock(on, { now: 10 * HOUR })
+  const w = world(on, { name: '🫪 🤖 Marvin' })
+  w.row(10 * HOUR - 11 * MIN)
+  w.store.set('styles', [{ emojis: ['🫪', '🫪', '🫪'], atEnd: false, sep: '', open: '', close: '', topic: false, topicSep: '·', topicOpen: '', topicClose: '' }])
+  await start($)
+  expect(w.renames).toEqual(['😴 🤖 Marvin'])
+})
+
+test('a name taken apart by the options used before, when the current ones find no mark', async () => {
+  const st = style({ level1_emoji: '😴' })
+  expect(decompose('(😴🫪) 🚀 Cortana', style({ brackets: '()', level1_emoji: '🫪', level2_emoji: '🫪' }), [style({ brackets: '()', level1_emoji: '😴', level2_emoji: '🫪' })]))
+    .toEqual({ base: '🚀 Cortana', level: 2, topic: null })
+  expect(decompose('😴 Builder', st, [])).toEqual({ base: 'Builder', level: 1, topic: null })
 })
 
 test('the person\'s /rename while marked: their name stands, and is not activity: the mark the idle time calls for comes back', async ($, on) => {

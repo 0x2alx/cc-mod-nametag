@@ -344,10 +344,23 @@ function escape(s: string): string {
 }
 
 // The name as this mod builds it, taken apart: the person's name, the levels of the mark on it, the
-// topic at its end. A mark in another style (the options changed) is taken off too, when it is a
-// run of the level emojis or 💤 at the front or the end. A name that only looks built ("💤 Notes", typed so)
+// topic at its end, by the current options or those it ran with before (`before`, from the store),
+// exactly; failing those, a run of the level emojis or 💤 at the front or the end. A name that only looks built ("💤 Notes", typed so)
 // is read the same way: the transcript can't say who set it.
-export function decompose(name: string, st: Style): { base: string; level: number; topic: string | null } {
+export function decompose(name: string, st: Style, before: readonly Style[] = []): { base: string; level: number; topic: string | null } {
+  // a mark built by the current options or one used before (saved in the store), exactly; then one
+  // recognised loosely; else no mark, and the topic as the current options or older ones build it
+  const styles = [st, ...before]
+  const all = styles.map(s => exact(name, s))
+  const marked = all.find(d => d.level > 0)
+  if (marked) return marked
+  const l = loose(name, st)
+  if (l.level > 0) return l
+  return all.find(d => d.topic !== null) ?? l
+}
+
+// The name taken apart by one style exactly: its topic and its mark as that style builds them.
+function exact(name: string, st: Style): { base: string; level: number; topic: string | null } {
   let rest = name
   let topic: string | null = null
   const sep = st.topicSep === '' ? ' ' : ` ${escape(st.topicSep)} `
@@ -362,7 +375,13 @@ export function decompose(name: string, st: Style): { base: string; level: numbe
       return { base: rest.slice(pre.length, rest.length - post.length), level: n, topic }
     }
   }
-  // another style: the emojis, maybe in brackets, joined by a space or a short separator of signs
+  return { base: rest, level: 0, topic }
+}
+
+// No style matched: a mark of options older than those saved (or set before the mod kept them),
+// recognised by its emojis, maybe in brackets, joined by a space or a short separator of signs.
+function loose(name: string, st: Style): { base: string; level: number; topic: string | null } {
+  const { base: rest, topic } = exact(name, { ...st, levels: [] })
   const emojis = [...new Set(['💤', ...st.levels.map(l => l.emoji)])].map(escape).join('|')
   const mark = `[[({<]?(?:${emojis})+[\\])}>]?`
   // a separator is signs ("-", "|", "·"), never an emoji: that belongs to the name ("🫪 🤖 Marvin")
@@ -391,6 +410,41 @@ async function rename($: Engine, name: string): Promise<boolean> {
 // should be tried again later (the name couldn't be read, or the rename failed).
 type Want = { level?: number; topic?: string | null }
 
+// The mark and topic options this mod used, newest first, in its store ("styles"): when the options
+// change, a name built under the old ones is still taken apart exactly. Only the options, no names.
+const STYLES_KEY = 'styles'
+const STYLES_MAX = 5
+type Saved = { emojis: string[]; atEnd: boolean; sep: string; open: string; close: string; topic: boolean; topicSep: string; topicOpen: string; topicClose: string }
+
+function saved(st: Style): Saved {
+  return { emojis: st.levels.map(l => l.emoji), atEnd: st.atEnd, sep: st.sep, open: st.open, close: st.close, topic: st.topic, topicSep: st.topicSep, topicOpen: st.topicOpen, topicClose: st.topicClose }
+}
+
+async function savedStyles($: Engine): Promise<Saved[]> {
+  try {
+    const v = await $.store.get(STYLES_KEY)
+    return Array.isArray(v) ? (v as Saved[]).filter(x => x && Array.isArray(x.emojis)) : []
+  } catch {
+    return []
+  }
+}
+
+// The options used before these, as styles to read names by.
+async function before($: Engine, st: Style): Promise<Style[]> {
+  const now = JSON.stringify(saved(st))
+  return (await savedStyles($)).filter(x => JSON.stringify(x) !== now).map(x => ({
+    ...x, levels: x.emojis.map(emoji => ({ emoji, ms: 0 })), topicModel: st.topicModel,
+  }))
+}
+
+// At each start: the current options go first in the list (when they changed, the list changes).
+async function rememberStyle($: Engine, st: Style): Promise<void> {
+  const list = await savedStyles($)
+  const now = JSON.stringify(saved(st))
+  if (list.length && JSON.stringify(list[0]) === now) return
+  await $.store.set(STYLES_KEY, [saved(st), ...list.filter(x => JSON.stringify(x) !== now)].slice(0, STYLES_MAX))
+}
+
 // For the optional wake hook (extras/wake-hook.sh, a UserPromptSubmit command hook in the settings):
 // <config>/nametag/wake/<session id>, line 1 the marked name this mod set, as JSON (the hook matches
 // it against the session_title it is given), line 2 the hook's answer, the name without the mark.
@@ -416,7 +470,7 @@ async function render($: Engine, st: Style, want: Want): Promise<'done' | 'retry
   const name = await currentName($)
   if (name === undefined) return 'retry'
   if (name === null || name.trim() === '') return 'done'
-  const now = decompose(name, st)
+  const now = decompose(name, st, await before($, st))
   const level = Math.min(want.level ?? now.level, st.levels.length)
   let topic = want.topic !== undefined ? want.topic : now.topic
   if (!st.topic || topicOff || (topic && inName(now.base, topic))) topic = null
@@ -794,6 +848,7 @@ async function prune($: Engine): Promise<void> {
   const cutoff = (await $.clock.now()) - KEEP_DAYS * 24 * 60 * 60 * 1000
   for (const key of await $.store.keys()) {
     const v = await $.store.get(key)
+    if (key === STYLES_KEY) continue
     if (!key.startsWith('asked:') || typeof v !== 'number' || v < cutoff) await $.store.delete(key)
   }
 }
@@ -804,7 +859,7 @@ async function named($: Engine, st: Style): Promise<{ base: string; current: str
   await serial($, async () => {
     const name = await currentName($)
     if (!name || name.trim() === '') return
-    const d = decompose(name, st)
+    const d = decompose(name, st, await before($, st))
     out = { base: d.base, current: d.topic }
   })
   return out
@@ -898,6 +953,7 @@ export const register: Register = (on, options) => {
     interactive = e.isInteractive
     if (!e.isInteractive) return r
     await prune($).catch(err => $.ui.log(`nametag: ${err}`, { to: 'debug' }))
+    await rememberStyle($, st).catch(err => $.ui.log(`nametag: ${err}`, { to: 'debug' }))
     // A start (restart, resume, reload) is not activity: the idle time runs from the transcript's
     // last activity, and the name gets the levels that time calls for right away, no more and no
     // less. A session with no activity yet starts counting now. Not awaited: a rename waits for a
