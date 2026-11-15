@@ -48,6 +48,7 @@ const TOPIC_FLOOR_MS = 120 * MIN_MS // no break: one check after this long anywa
 const TOPIC_SHARE = 0.6 // a project leads when it has this share of the path weight...
 const TOPIC_MIN_WEIGHT = 5 // ...and at least this much of it
 const TOPIC_MAX_LEN = 20
+const TOPIC_MAX_WORDS = 2
 // Tools whose path says where the work is: an edit says more than a read.
 const PATH_TOOLS: Record<string, { field: string; weight: number; dir?: true }> = {
   Edit: { field: 'file_path', weight: 3 },
@@ -479,7 +480,7 @@ function baseName(dir: string): string {
 
 // A folder's name as a topic: cleaned like the model's answer; a dot folder is none.
 function folderTopic(name: string): string | null {
-  return name.startsWith('.') ? null : cleanTopic(name, null)
+  return name.startsWith('.') ? null : cleanTopic(name, null, 'last')
 }
 
 const gitDirs = new Map<string, boolean>()
@@ -561,9 +562,10 @@ export function recentLines(messages: readonly { role: string; text: string }[])
   return out.reverse()
 }
 
-// The model's answer as a label: one line, letters, digits, '.', '_' and '-', TOPIC_MAX_LEN at most.
-// SAME keeps `current`. Null when nothing usable is left.
-export function cleanTopic(text: string, current: string | null): string | null {
+// The model's answer as a label: one line, letters, digits, '.', '_' and '-', two words at most
+// (`keep` says which two: a folder like "cc-mod-billing-api" says most in its last ones), and
+// TOPIC_MAX_LEN characters at most. SAME keeps `current`. Null when nothing usable is left.
+export function cleanTopic(text: string, current: string | null, keep: 'first' | 'last' = 'first'): string | null {
   const line = (text.trim().split('\n')[0] ?? '').trim().replace(/^["'`*]+|["'`*.]+$/g, '')
   if (/^same$/i.test(line)) return current
   const slug = line
@@ -571,9 +573,10 @@ export function cleanTopic(text: string, current: string | null): string | null 
     .replace(/[^\p{L}\p{N}._-]/gu, '')
     .replace(/-{2,}/g, '-')
     .replace(/^[-._]+|[-._]+$/g, '')
-    .slice(0, TOPIC_MAX_LEN)
-    .replace(/[-._]+$/, '')
-  return slug === '' ? null : slug
+  const words = slug.split(/[-_]+/).filter(Boolean)
+  const two = (keep === 'last' ? words.slice(-TOPIC_MAX_WORDS) : words.slice(0, TOPIC_MAX_WORDS)).join('-')
+  const label = two.slice(0, TOPIC_MAX_LEN).replace(/[-._]+$/, '')
+  return label === '' ? null : label
 }
 
 const TOPIC_SYSTEM = 'You label work sessions. Reply with the label only.'
@@ -587,8 +590,8 @@ async function askModel($: Engine, st: Style, current: string | null): Promise<s
     'Recent messages:',
     ...lines,
     '',
-    'Give one short label for what this session is working on now: one word, or up to three joined by',
-    'hyphens, like "billing-api" or "web-search". If the current label still fits, reply SAME.',
+    'Give one short label for what this session is working on now: one word, or two joined by a',
+    'hyphen, like "billing-api" or "web-search". If the current label still fits, reply SAME.',
   ].join('\n')
   const r = await $.model.complete({ model: st.topicModel, system: TOPIC_SYSTEM, prompt, maxTokens: 20, timeoutMs: 30000 })
   if (!r.isAnswered) {

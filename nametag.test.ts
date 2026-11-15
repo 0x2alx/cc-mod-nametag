@@ -857,6 +857,18 @@ test('topic: a topic the name already says is left off', { options: TOPIC }, asy
   expect(w.renames).toEqual([])
 })
 
+test('topic: a long folder name gives its last two words', { options: TOPIC }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  w.dirs['/work/demo'] = ['cc-mod-billing-api']
+  w.git.add('/work/demo/cc-mod-billing-api/.git')
+  await start($)
+  await edit($, '/work/demo/cc-mod-billing-api/a.ts')
+  await edit($, '/work/demo/cc-mod-billing-api/b.ts')
+  await turns($, clock, 3)
+  expect(w.renames).toEqual(['Builder [billing-api]'])
+})
+
 test('topic: a dot folder is no project', { options: TOPIC }, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on, { name: 'Builder' })
@@ -993,8 +1005,12 @@ test('topic: the label cleanup', async () => {
   expect(cleanTopic('  "**Web Search**."\nbecause...', null)).toBe('Web-Search')
   expect(cleanTopic('SAME', 'alpha')).toBe('alpha')
   expect(cleanTopic('same.', null)).toBe(null)
-  expect(cleanTopic('a-very-long-label-that-goes-on', null)).toBe('a-very-long-label-th')
-  expect(cleanTopic('rm -rf / ; echo $HOME', null)).toBe('rm-rf-echo-HOME')
+  expect(cleanTopic('a-very-long-label-that-goes-on', null)).toBe('a-very')
+  expect(cleanTopic('internationalization-framework', null)).toBe('internationalization')
+  expect(cleanTopic('rm -rf / ; echo $HOME', null)).toBe('rm-rf')
+  expect(cleanTopic('Lisbon trip planning', null)).toBe('Lisbon-trip')
+  expect(cleanTopic('cc-mod-billing-api', null, 'last')).toBe('billing-api')
+  expect(cleanTopic('snake_case_name', null)).toBe('snake-case')
   expect(cleanTopic('🙂', null)).toBe(null)
   expect(cleanTopic('café-menu', null)).toBe('café-menu')
 })

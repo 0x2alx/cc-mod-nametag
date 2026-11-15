@@ -96,7 +96,7 @@ Builder [billing-api]        💤 Builder [billing-api]        Builder 💤 [bil
 - otherwise, a repository of its own inside the session's folder; the session's own repository says nothing new, so it doesn't count;
 - outside the session's folder: the nearest repository above the file.
 
-When one project has at least 60% of the weight (and at least 5), it is the topic, with no model call. Otherwise (research, chat, files all over the place), the mod asks `topic_model` once: the last six prompts and two replies, about 300 characters each, and "one short label, or SAME if the current one still fits". The answer is cut to one line of letters, digits, `.`, `_` and `-`, 20 characters at most.
+When one project has at least 60% of the weight (and at least 5), it is the topic, with no model call. Otherwise (research, chat, files all over the place), the mod asks `topic_model` once: the last six prompts and two replies, about 300 characters each, and "one short label, or SAME if the current one still fits". The answer is cut to one line of letters, digits, `.`, `_` and `-`: two words at most, 20 characters at most. A long folder name keeps its last two words (`cc-mod-billing-api` gives `billing-api`).
 
 **When it checks.** At the end of a turn of the main conversation, cheapest test first:
 
