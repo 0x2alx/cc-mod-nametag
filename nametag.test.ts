@@ -530,6 +530,19 @@ test('a restart goes on counting from the transcript\'s last activity: 4 hours i
   expect(w.renames.at(-1)).toBe('Builder')
 })
 
+test('a resume\'s synthetic reply is not activity: the restart shows the level the real idle time calls for', async ($, on) => {
+  const clock = mock.clock(on, { now: 100 * HOUR })
+  const w = world(on, { name: 'Builder' })
+  w.row(96 * HOUR)
+  // what --continue writes at the restart
+  w.text += JSON.stringify({ type: 'assistant', timestamp: new Date(100 * HOUR - 1000).toISOString(), isApiErrorMessage: false, message: { model: '<synthetic>', role: 'assistant', content: [{ type: 'text', text: 'No response requested.' }] } }) + '\n'
+  await start($)
+  expect(w.renames).toEqual(['💤💤 Builder'])
+  expect(lastActivityIn(w.text)).toBe(96 * HOUR)
+  await clock.advance(2 * MIN) // the ticks that read the transcript again keep the level
+  expect(w.renames).toEqual(['💤💤 Builder'])
+})
+
 test('a restart of a marked session sets the level the idle time calls for, up or down', async ($, on) => {
   mock.clock(on, { now: 100 * HOUR })
   const w = world(on, { name: '💤 Builder' })

@@ -277,7 +277,8 @@ export function lastActivityIn(text: string): number | null {
       const row = JSON.parse(l)
       // Not a meta row: Claude Code adds one after every rename ("The user named this session..."),
       // from this mod (origin plugin) or the person; a turn that follows has rows of its own.
-      if (row?.isMeta === true || row?.origin?.kind === 'plugin') continue
+      // Nor a synthetic reply: a resume (--continue) writes "No response requested." as model <synthetic>.
+      if (row?.isMeta === true || row?.origin?.kind === 'plugin' || row?.message?.model === '<synthetic>') continue
       if ((row?.type === 'user' || row?.type === 'assistant') && typeof row.timestamp === 'string') {
         const t = Date.parse(row.timestamp)
         if (!Number.isNaN(t)) return t
