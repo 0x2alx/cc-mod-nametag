@@ -18,6 +18,7 @@ function world(on: any, opts: { name?: string; size?: number; env?: Record<strin
     agents: [] as { id: string; status: string }[], results: {} as Record<string, unknown>, agentLists: 0,
     git: new Set<string>(), dirs: {} as Record<string, string[]>, messages: [] as { role: string; text: string }[],
     answers: [] as string[], asks: 0, prompts: [] as string[], tails: 0,
+    metaAt: 0, // when set, each rename also adds the meta row Claude Code writes after one, at this time
     title: (name: string) => { w.text += JSON.stringify({ type: 'custom-title', customTitle: name, sessionId: w.id }) + '\n' },
     // a prompt (or reply) in the transcript at `ms`
     row: (ms: number, type = 'user') => { w.text += JSON.stringify({ type, timestamp: new Date(ms).toISOString(), message: { content: 'x' } }) + '\n' },
@@ -81,6 +82,7 @@ function world(on: any, opts: { name?: string; size?: number; env?: Record<strin
       if (w.gate && e.origin?.kind !== 'composer') await w.gate // the person's own run at once
       if (w.failRenames > 0) { w.failRenames--; throw new Error('rename refused') }
       w.renames.push(e.args); title(e.args)
+      if (w.metaAt) w.text += JSON.stringify({ type: 'user', isMeta: true, origin: { kind: 'plugin', name: 'nametag' }, message: { content: `The user named this session "${e.args}"` }, timestamp: new Date(w.metaAt).toISOString() }) + '\n'
     }
     return { text: `Session renamed to: ${e.args}` }
   })
@@ -535,6 +537,22 @@ test('a restart of a marked session sets the level the idle time calls for, up o
   expect(w.renames).toEqual(['💤💤💤 Builder'])
 })
 
+test('a reload while marked keeps the mark: the rename\'s own transcript row is not activity', async ($, on) => {
+  const clock = mock.clock(on, { now: 100 * HOUR })
+  const w = world(on, { name: 'Ted' })
+  w.row(100 * HOUR)
+  w.metaAt = 100 * HOUR + 11 * MIN
+  await start($)
+  await clock.advance(11 * MIN)
+  expect(w.renames).toEqual(['💤 Ted'])
+  await clock.advance(7 * MIN)
+  await start($) // the reload
+  await clock.advance(MIN)
+  expect(w.renames).toEqual(['💤 Ted'])
+  await clock.advance(3 * HOUR)
+  expect(w.renames).toEqual(['💤 Ted', '💤💤 Ted'])
+})
+
 test('a restart soon after activity: no mark yet, and the next comes when the idle time is due', async ($, on) => {
   const clock = mock.clock(on, { now: 100 * HOUR })
   const w = world(on, { name: '💤 Builder' })
@@ -552,6 +570,10 @@ test('renames and bookkeeping rows are not activity; a prompt row is', async () 
   const text = [at(1000, 'user'), at(2000, 'assistant'), at(3000, 'system', { subtype: 'local_command' }), at(4000, 'attachment'),
     JSON.stringify({ type: 'custom-title', customTitle: 'x' }), '{"type":"user","timest'].join('\n')
   expect(lastActivityIn(text)).toBe(2000)
+  // the row Claude Code adds after each rename, as it is in a real transcript
+  const meta = JSON.stringify({ type: 'user', isMeta: true, origin: { kind: 'plugin', name: 'nametag' }, message: { content: '<system-reminder>\nThe user named this session "💤 Ted"' }, timestamp: new Date(9000).toISOString() })
+  const typed = JSON.stringify({ type: 'user', isMeta: true, message: { content: '<system-reminder>\nThe user named this session "Ted"' }, timestamp: new Date(9500).toISOString() })
+  expect(lastActivityIn([at(2000, 'assistant'), meta, typed].join('\n'))).toBe(2000)
   expect(lastActivityIn('{"type":"custom-title","customTitle":"x"}')).toBe(null)
 })
 

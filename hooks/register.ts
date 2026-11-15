@@ -263,7 +263,8 @@ async function currentName($: Engine): Promise<string | null | undefined> {
 
 // When the session last had activity, from the transcript: the newest timestamped row of the
 // conversation itself (a prompt, a reply, a tool result, a background task's notice). Renames,
-// notices and bookkeeping rows don't count. Null when none is found.
+// the meta rows Claude Code adds after them, notices and bookkeeping rows don't count. Null when
+// none is found.
 export function lastActivityIn(text: string): number | null {
   const lines = text.split('\n')
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -271,6 +272,9 @@ export function lastActivityIn(text: string): number | null {
     if (!l.includes('"timestamp"') || !(l.includes('"type":"user"') || l.includes('"type":"assistant"'))) continue
     try {
       const row = JSON.parse(l)
+      // Not a meta row: Claude Code adds one after every rename ("The user named this session..."),
+      // from this mod (origin plugin) or the person; a turn that follows has rows of its own.
+      if (row?.isMeta === true || row?.origin?.kind === 'plugin') continue
       if ((row?.type === 'user' || row?.type === 'assistant') && typeof row.timestamp === 'string') {
         const t = Date.parse(row.timestamp)
         if (!Number.isNaN(t)) return t
@@ -771,16 +775,16 @@ export const register: Register = (on, options) => {
     if (arg === 'off') {
       topicOff = true
       void serial($, () => render($, st, { topic: null }))
-      return { text: 'nametag: no topic for this session (/topic on to bring it back)' }
+      return { text: 'no topic for this session (/topic on to bring it back)' }
     }
     if (arg === 'on') {
       topicOff = false
       misses = 0
       await $.store.delete(askedKey(await $.session.id()))
       topicTurn($, st).catch(err => $.ui.log(`nametag: ${err}`, { to: 'debug' }))
-      return { text: 'nametag: topic on for this session' }
+      return { text: 'topic on for this session' }
     }
-    return { text: `nametag: topic is ${topicOff ? 'off' : 'on'} for this session; /topic off or /topic on` }
+    return { text: `topic is ${topicOff ? 'off' : 'on'} for this session; /topic off or /topic on` }
   })
 
   // The person renames the session: a command typed in the session, so activity. Their name is
