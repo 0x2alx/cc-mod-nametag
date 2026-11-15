@@ -76,7 +76,7 @@ The mod checks once a minute, so each step lands within a minute of its delay. I
 ## Topic
 
 > [!WARNING]
-> **Turning the topic on uses your tokens.** When the files a session touches don't name a project, the mod calls `topic_model` (Haiku by default) through your own Claude Code session. Those calls are billed to your account: to your API bill, or against your subscription's usage limits. You turn it on, so watching that usage (`/cost`, your Console or plan usage page) is up to you. The mod is provided as is, without warranty and without liability for any cost it incurs (see the [license](LICENSE)).
+> **The topic is off by default, and the idle mark never calls a model.** Turning the topic on uses your tokens: when the files a session touches don't name a project, the mod calls `topic_model` (Haiku by default) through your own Claude Code session. Those calls are billed to your account: to your API bill, or against your subscription's usage limits. You turn it on, so watching that usage (`/cost`, your Console or plan usage page) is up to you. The mod is provided as is, without warranty and without liability for any cost it incurs (see the [license](LICENSE)).
 
 Off by default. With `"topic": "on"` the mod ends the session's name with a short label for the current work, awake or asleep:
 
