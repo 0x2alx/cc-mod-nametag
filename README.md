@@ -3,7 +3,7 @@
 A [Claude Code](https://claude.com/claude-code) mod that tags each session's name with what it is doing, so you can tell your sessions apart at a glance when you run several of them, for example in tmux or through Remote Control. It keeps two tags, each with its own options:
 
 - **Idle mark** (on by default). When a session has had no prompt and no turn for 10 minutes, it puts `💤 ` in front of the session's name; after 3 hours the mark becomes `💤💤 `, after 12 hours `💤💤💤 `. When the next turn ends, it takes the mark off again. The mark always matches the time since the session's last activity: a session restarted or reloaded after 4 quiet hours shows `💤💤 ` right away. The delays and the emoji of each step are options.
-- **Topic** (off by default). It ends the name with a short label for what that session is working on (`Builder [billing]`), taken from the files it touches or, when they don't say, from a small model. See [Topic](#topic).
+- **Topic** (off by default). It ends the name with a short label for what that session is working on (`Builder [billing]`), taken from the files it touches or, when they don't say, from a small model, which uses your tokens. See [Topic](#topic).
 
 ```
 Builder  →  10 min  →  💤 Builder  →  3 h  →  💤💤 Builder  →  12 h  →  💤💤💤 Builder
@@ -75,6 +75,9 @@ The mod checks once a minute, so each step lands within a minute of its delay. I
 
 ## Topic
 
+> [!WARNING]
+> **Turning the topic on uses your tokens.** When the files a session touches don't name a project, the mod calls `topic_model` (Haiku by default) through your own Claude Code session. Those calls are billed to your account: to your API bill, or against your subscription's usage limits. You turn it on, so watching that usage (`/cost`, your Console or plan usage page) is up to you. The mod is provided as is, without warranty and without liability for any cost it incurs (see the [license](LICENSE)).
+
 Off by default. With `"topic": "on"` the mod ends the session's name with a short label for the current work, awake or asleep:
 
 ```
@@ -124,6 +127,8 @@ The label is whatever the model answers, cleaned as above, so now and then it ma
 
 ## Cost
 
+The idle mark makes no model calls. The topic does: see [Topic](#topic), and the warning there.
+
 Each rename goes through `/rename`, which adds a short "Session renamed to: …" line to the conversation. The model reads that line, so each step and the wake cost about 15 input tokens each: about 30 for a short break, about 45 for a night away (two steps and the wake). A session that is never idle for long costs nothing.
 
 ## What it reads and sends
@@ -156,4 +161,4 @@ Run them from the repository with `claude` on your `PATH`; `test` needs a writab
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE). The software is provided as is, without warranty of any kind; the authors are not liable for any claim, damages or costs arising from its use, model usage included.

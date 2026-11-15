@@ -1,6 +1,6 @@
 {
   "name": "nametag",
-  "version": "0.15.1",
+  "version": "0.15.2",
   "description": "Tags each session's name with what it is doing: an idle mark (💤, 💤💤, 💤💤💤) cleared at the next turn, and optionally a short topic of the current work at the end",
   "author": {
     "name": "0x2alx"
@@ -94,7 +94,7 @@
     "topic": {
       "type": "string",
       "title": "Topic",
-      "description": "End the session's name with a short label for what it is working on (on), or not (off). When the paths the session touches don't say, it asks a small model, which uses tokens",
+      "description": "End the session's name with a short label for what it is working on (on), or not (off). When the paths the session touches don't say, it asks a small model: those calls are billed to your account (API or subscription usage), and watching that usage is up to you",
       "default": "off",
       "options": [
         "off",
