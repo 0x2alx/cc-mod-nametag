@@ -98,19 +98,18 @@ Builder [billing-api]        💤 Builder [billing-api]        Builder 💤 [bil
 
 When one project has at least 60% of the weight (and at least 5), it is the topic, with no model call. Otherwise (research, chat, files all over the place), the mod asks `topic_model` once: the last six prompts and two replies, about 300 characters each, and "one short label, or SAME if the current one still fits". The answer is cut to one line of letters, digits, `.`, `_` and `-`: two words at most, 20 characters at most. A long folder name keeps its last two words (`cc-mod-billing-api` gives `billing-api`).
 
-**When it checks.** At the end of a turn of the main conversation, cheapest test first:
+**When it checks.** At the end of each turn of the main conversation, cheapest test first:
 
-1. topic off, a headless session, or fewer than 3 turns since the last check: no;
+1. topic off, or a headless session: no;
 2. within `topic_freeze_hours` of you renaming the session: no;
-3. less than 30 minutes since the last check: no (after a check that found nothing, 1 hour, then 2);
-4. a break since the last check (no topic yet, back from a 💤, a compaction, or the files point at another project): check;
-5. no break: check only if 2 hours have passed.
+3. the paths, every turn (free): one project leads, so it is the topic. The path weight halves every 10 minutes, so the last half hour or so of work decides, and a switch to another project shows within a few edits;
+4. no project leads: the model, once 3 turns and 10 minutes have passed since its last check (after a check that found nothing, 20 minutes, then 40, up to 2 hours).
 
-A check that ends with the same topic renames nothing. A topic the name already says (`alpha` in `Alpha work`) is left off. In practice the topic changes a few times a day at most, at the breaks where your work usually changes.
+A check that ends with the same topic renames nothing. A topic the name already says (`alpha` in `Alpha work`) is left off. 
 
-**Your own name wins.** When you rename the session, your name stands alone, without a topic, for `topic_freeze_hours`; at the next check after that, the topic comes back at the end of your new name. A `/rename` is seen at once; a rename from the app or claude.ai is seen at the next check or the next 💤. The mod never reads a topic back out of a name: like the mark, it keeps the topic in its record and builds the whole name each time.
+**Your own name wins.** When you rename the session, your name stands alone, without a topic, for `topic_freeze_hours`; at the next check after that, the topic comes back at the end of your new name. A `/rename` is seen at once; a rename from the app or claude.ai is seen at the next model check or the next 💤. The mod never reads a topic back out of a name: like the mark, it keeps the topic in its record and builds the whole name each time.
 
-**Cost.** A path-led topic costs nothing but the rename (about 15 input tokens, as below). A model-led check sends roughly 300 to 700 input tokens to `topic_model` and gets a few back, at most once every 30 minutes (every 2 hours while it keeps finding nothing) and in practice far less often. Unnamed sessions are never checked.
+**Cost.** A path-led topic costs nothing but the rename (about 15 input tokens, as below). A model-led check sends roughly 300 to 700 input tokens to `topic_model` and gets a few back, only while the files don't name a project, and at most once every 10 minutes of active work (less often while it keeps finding nothing); an idle session makes none. Unnamed sessions are never checked.
 
 ## What it does, exactly
 

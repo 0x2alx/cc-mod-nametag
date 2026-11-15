@@ -14,12 +14,12 @@
 // and under "freeze:<session id>": until when topics wait after the person renamed the session.
 export type Mark = { set: string; base: string; at: number; level?: number; topic?: string | null }
 
-// Between topic checks: turns since the last check, when it was, the path weight per project and
-// in all, whether the session slept or compacted since, the project that led at the last check, and
-// how many checks in a row found nothing (each doubles the wait).
+// Between topic checks: turns since the last model check, when it was, the path weight per project
+// and in all (it halves every 10 minutes; decayedAt: when it last did), and how many model checks in
+// a row found nothing (each doubles the wait).
 export type TopicMemory = {
   turns: number; lastCheck: number; weights: Record<string, number>; total: number
-  afterSleep: boolean; compacted: boolean; lastProject: string | null; misses: number
+  decayedAt: number; misses: number
 }
 
 declare module 'claude-code' {

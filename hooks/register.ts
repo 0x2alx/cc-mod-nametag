@@ -13,9 +13,9 @@ import type { Mark, TopicMemory } from '../types'
 // Topic (option, off by default): a short label for what the session is working on, kept at the
 // very end of the name ("Builder [billing-api]", asleep "💤 Builder [billing-api]"), awake or not.
 // It comes from the paths the session's tools touch (a project folder that clearly leads) or, when
-// they don't say, from one small-model call on the last few messages; checked only at natural breaks
-// and at most every 30 minutes, renamed only when it changes, and held back for a while after the
-// person renames the session.
+// they don't say, from one small-model call on the last few messages. The paths are checked at the
+// end of every turn (that costs nothing), the model at most every 10 minutes; renamed only when it
+// changes, and held back for a while after the person renames the session.
 //
 // The name is always built from the name the person gave the session, never parsed out of a name.
 // The transcript doesn't say who set a name, so the mod keeps a record per session in its store:
@@ -42,9 +42,9 @@ const WORK_MAX_MS = 24 * 60 * 60 * 1000 // a background task whose end was never
 const AGENT_BUSY = new Set(['pending', 'running', 'waiting'])
 
 const MIN_MS = 60 * 1000
-const TOPIC_MIN_TURNS = 3 // turns since the last check before another
-const TOPIC_RATE_MS = 30 * MIN_MS // at a break: at most one check this often
-const TOPIC_FLOOR_MS = 120 * MIN_MS // no break: one check after this long anyway
+const TOPIC_MIN_TURNS = 3 // turns since the last model check before another
+const TOPIC_RATE_MS = 10 * MIN_MS // at most one model check this often; the path weight halves this often too
+const TOPIC_MAX_WAIT_MS = 120 * MIN_MS // checks that find nothing double the wait, up to this
 const TOPIC_SHARE = 0.6 // a project leads when it has this share of the path weight...
 const TOPIC_MIN_WEIGHT = 5 // ...and at least this much of it
 const TOPIC_MAX_LEN = 20
@@ -426,7 +426,6 @@ async function tick($: Engine, st: Style): Promise<void> {
     if (result === 'renamed') await active($)
     else if (result === 'done' && lastActivity === since) {
       reached = n
-      if (st.topic) await setMem($, m => ({ ...m, afterSleep: true }))
     }
   })
 }
@@ -439,7 +438,7 @@ async function active($: Engine): Promise<void> {
 // ---- the topic ------------------------------------------------------------------------------
 
 function fresh(): TopicMemory {
-  return { turns: 0, lastCheck: 0, weights: {}, total: 0, afterSleep: false, compacted: false, lastProject: null, misses: 0 }
+  return { turns: 0, lastCheck: 0, weights: {}, total: 0, decayedAt: 0, misses: 0 }
 }
 
 async function mem($: Engine): Promise<TopicMemory> {
@@ -530,8 +529,9 @@ async function projectOf($: Engine, path: string, isDir: boolean): Promise<strin
 
 async function notePath($: Engine, path: string, weight: number, isDir: boolean): Promise<void> {
   const project = await projectOf($, path, isDir)
+  const now = await $.clock.now()
   await setMem($, m => ({
-    ...m,
+    ...(m = decay(m, now)), // the old weight halves before the new is added
     total: m.total + weight,
     weights: project ? { ...m.weights, [project]: (m.weights[project] ?? 0) + weight } : m.weights,
   }))
@@ -601,51 +601,72 @@ async function askModel($: Engine, st: Style, current: string | null): Promise<s
   return cleanTopic(r.text, current)
 }
 
-// At the end of each turn of the main conversation: is a topic check due? The cheapest checks first.
-// After a check that found nothing (the model failed, or only gave the name back), the 30 minutes
-// double each time, up to the 2-hour floor.
-async function topicTurn($: Engine, st: Style): Promise<void> {
-  if (!st.topic || !interactive) return
-  await setMem($, m => ({ ...m, turns: m.turns + 1 }))
-  const m = await mem($)
-  if (m.turns < TOPIC_MIN_TURNS) return
-  if (await frozen($)) return
-  const now = await $.clock.now()
-  const since = m.lastCheck === 0 ? Infinity : now - m.lastCheck // 0: never checked
-  if (since < Math.min(TOPIC_RATE_MS * 2 ** m.misses, TOPIC_FLOOR_MS)) return
-  const id = await $.session.id()
-  const project = leader(m.weights, m.total)
-  const before = (await record($, id))?.topic ?? null
-  const atBreak = !before || m.afterSleep || m.compacted || (project !== null && project !== m.lastProject && project !== before)
-  if (!atBreak && since < TOPIC_FLOOR_MS) return
-  await setMem($, x => ({ ...x, turns: 0, lastCheck: now }))
+// The path weight halves every TOPIC_RATE_MS, so the paths of the last half hour or so decide.
+export function decay(m: TopicMemory, now: number): TopicMemory {
+  if (!m.decayedAt) return { ...m, decayedAt: now } // 0, or a memory from before 0.9
+  const k = Math.floor((now - m.decayedAt) / TOPIC_RATE_MS)
+  if (k <= 0) return m
+  const f = k >= 20 ? 0 : 0.5 ** k
+  const weights: Record<string, number> = {}
+  for (const [p, v] of Object.entries(m.weights)) if (v * f >= 0.5) weights[p] = v * f
+  return { ...m, weights, total: m.total * f, decayedAt: m.decayedAt + k * TOPIC_RATE_MS }
+}
 
-  // The name and the record, read in step with the renames: a name the mod didn't set is the
-  // person's (renamed from the app, say), which stands alone while topics wait.
-  let base: string | null = null
-  let current: string | null = null
+// The person's name under the mod's, and the topic now on it, read in step with the renames. A
+// name the mod didn't set is the person's (renamed from the app, say), which stands alone while
+// topics wait. Null: unnamed, unreadable, or just renamed by the person.
+async function named($: Engine, st: Style, id: string): Promise<{ base: string; current: string | null } | null> {
+  let out: { base: string; current: string | null } | null = null
   await serial($, async () => {
     const name = await currentName($)
-    if (!name || name.trim() === '') return // unnamed, or unreadable: no model call
+    if (!name || name.trim() === '') return
     const mine = await record($, id)
     if (mine && mine.set !== name) {
       await $.store.delete(recordKey(id))
       await freeze($, st)
       return
     }
-    base = mine ? mine.base : name
-    current = mine?.topic ?? null
+    out = { base: mine ? mine.base : name, current: mine?.topic ?? null }
   })
-  if (base === null) return
+  return out
+}
 
-  let topic = project ?? (await askModel($, st, current))
-  if (topic && inName(base, topic)) topic = null
-  if (!topic) {
-    await setMem($, x => ({ ...x, misses: x.misses + 1 })) // breaks noted so far still count next time
+// At the end of each turn of the main conversation, cheapest test first. The paths first: when one
+// project leads them, it is the topic, with no model call. Otherwise the model, after 3 turns and
+// 10 minutes since its last check; a check that found nothing (the model failed, or only gave the
+// name back) doubles the wait, up to 2 hours.
+async function topicTurn($: Engine, st: Style): Promise<void> {
+  if (!st.topic || !interactive) return
+  const now = await $.clock.now()
+  await setMem($, m => ({ ...decay(m, now), turns: m.turns + 1 }))
+  if (await frozen($)) return
+  const m = await mem($)
+  const id = await $.session.id()
+  const project = leader(m.weights, m.total)
+
+  if (project !== null) {
+    if (((await record($, id))?.topic ?? null) === project) return // the record alone: no name read
+    const n = await named($, st, id)
+    if (!n || n.current === project || inName(n.base, project)) return
+    await setMem($, x => ({ ...x, misses: 0 }))
+    await serial($, () => render($, st, { topic: project }))
     return
   }
-  await setMem($, x => ({ ...fresh(), turns: x.turns, lastCheck: now, lastProject: project ?? x.lastProject }))
-  if (topic !== current) await serial($, () => render($, st, { topic }))
+
+  if (m.turns < TOPIC_MIN_TURNS) return
+  const since = m.lastCheck === 0 ? Infinity : now - m.lastCheck // 0: never checked
+  if (since < Math.min(TOPIC_RATE_MS * 2 ** m.misses, TOPIC_MAX_WAIT_MS)) return
+  await setMem($, x => ({ ...x, turns: 0, lastCheck: now }))
+  const n = await named($, st, id)
+  if (!n) return // no model call
+  let topic = await askModel($, st, n.current)
+  if (topic && inName(n.base, topic)) topic = null
+  if (!topic) {
+    await setMem($, x => ({ ...x, misses: x.misses + 1 }))
+    return
+  }
+  await setMem($, x => ({ ...x, misses: 0 }))
+  if (topic !== n.current) await serial($, () => render($, st, { topic }))
 }
 
 // ---- hooks ---------------------------------------------------------------------------------
@@ -698,13 +719,6 @@ export const register: Register = (on, options) => {
       if (mine && name !== undefined && name !== mine.set) await $.store.delete(recordKey(id))
       await freeze($, st)
     })
-    return r
-  }).catch(($, e, next) => next(e))
-
-  // A compaction is a break in the work: the topic is checked again.
-  on('session.compact', async ($, e, next) => {
-    const r = await next(e)
-    if (!e.agentId && st.topic) await setMem($, m => ({ ...m, compacted: true })).catch(() => {})
     return r
   }).catch(($, e, next) => next(e))
 
