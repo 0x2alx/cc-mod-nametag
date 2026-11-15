@@ -125,12 +125,35 @@ The label is whatever the model answers, cleaned as above, so now and then it ma
 - **Only some sessions.** It marks only interactive sessions (and gives topics only to them), never `claude -p`, the SDK or other headless runs, though a headless turn on a marked session (for example `claude -p --resume`) still takes the mark off. It acts only on sessions that have a name, meaning `/rename` was used at least once or the session was started with `--name`. It leaves unnamed sessions alone.
 - **What counts as activity.** Your prompts, and every turn of the main conversation, including turns started by background tasks or other tools. Subagent turns don't count. A turn that is still running, for example one waiting for you to approve a tool, is never marked.
 - **Work in the background counts as activity.** While a subagent or teammate is running, a command runs in the background (`run_in_background`, or Ctrl+B), or a workflow is running, the session isn't idle; the idle time starts when the last of them ends. Agents come from Claude Code's list of the session's agents. Background commands and workflows have no such list for mods, so at each check the mod works them out from the conversation: the ones it put in the background since Claude Code last started (a restart ends them), less those with a notice of their end or stopped with TaskStop. A command a subagent puts in the background counts too, even after the subagent is done, until its end notice shows in that subagent's own transcript (where Claude Code delivers it). A Monitor is a watch, not work, so it doesn't count, and neither does a teammate waiting for a message or an agent waiting for your approval.
-- **When the mark comes off.** At the end of the next turn, not when you press Enter. Claude Code doesn't let a rename run while a turn holds the session, so the name keeps the mark while that turn runs.
+- **When the mark comes off.** At the end of the next turn, not when you press Enter. Claude Code doesn't let a mod's rename run while a turn holds the session, so the name keeps the mark while that turn runs. The optional [wake hook](#wake-hook-optional) takes it off as soon as you send a prompt.
 - **The mark matches the idle time, always.** Each check sets exactly the levels the time since the last activity calls for, whatever happened in between. The last activity is the newest prompt, reply or tool result in the session's transcript (renames, the "No response requested." a resume writes, the summary Claude Code writes when it compacts an idle session, and other bookkeeping rows don't count), kept up to date while the session runs by its prompts and turns. A start is not activity: a session started again (a restart, a reload of the mod, `--resume`, `--continue`) gets at once the mark its idle time calls for, and loses it at the end of your first turn. A session with nothing in it yet starts counting at its start.
-- **Renaming during a sleep.** If you rename a session while it is marked, your new name stands and the mod doesn't put the old one back, even when its own rename was waiting to run at that moment. A `/rename` is a command typed in the session, so it counts as activity: the idle time starts over from it. A rename from the app is not activity: at the next check, within a minute, your new name gets the mark the idle time calls for.
+- **Renaming during a sleep.** If you rename a session while it is marked, your new name stands and the mod doesn't put the old one back, even when its own rename was waiting to run at that moment. No rename is activity, a `/rename` you type included: at the next check, within a minute, your new name gets the mark the idle time calls for.
 - **The name it builds from.** The mod keeps nothing about the name between checks. Each time, it reads the session's name right then and takes off what it would have added itself: the mark as your options build it (or a mark of 💤s and the level emojis in another style, at the front or the end, so a change of options never stacks marks), and with topic on, a short label in the topic's brackets at the end. What's left is your name, and the new name is built from it. The transcript doesn't record who set a name, so this has a cost: a name you give that itself starts with the mark (`💤 Notes`), or with topic on ends in a bracketed word (`Notes [draft]`), is read as carrying a mark or topic, and that part is replaced.
 - **After `/clear`.** The new conversation starts fresh: background work and `/topic off` from before don't carry over.
 - **Named at launch.** `claude --name <name>` (or `-n`) counts as a name, the same as `/rename`. A name given only to `--remote-control <name>` doesn't reach the transcript, so the mod skips that session; add `--name` too, or `/rename` it once.
+
+## Wake hook (optional)
+
+A mod can't rename a session while a turn runs, so without it the mark stays until the turn ends. A settings hook can: Claude Code's `UserPromptSubmit` hook may set the session's title as the prompt is submitted, with the same effect as `/rename`. `extras/wake-hook.sh` is that hook. While a name is marked, the mod writes `<config>/nametag/wake/<session id>`, with the marked name and the name without the mark; when you send a prompt, the hook sets the name without the mark, but only if the session's name is still the marked one, so a name you changed since is left alone. It reads nothing else, sends nothing, and prints nothing when it has nothing to do. The mod still takes the mark off at the end of the turn, so nothing breaks without the hook.
+
+To use it, copy the script somewhere stable and add it to your settings (`~/.claude/settings.json`, merged with any `hooks` you already have):
+
+```bash
+mkdir -p ~/.claude/hooks
+curl -fsSL https://raw.githubusercontent.com/0x2alx/cc-mod-nametag/main/extras/wake-hook.sh -o ~/.claude/hooks/nametag-wake.sh
+```
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "sh ~/.claude/hooks/nametag-wake.sh" }] }
+    ]
+  }
+}
+```
+
+It needs `sh`, `sed` and `head`: macOS, Linux, and Git Bash on Windows (untested there). Read the script before you install it; it is 14 lines of code.
 
 ## Cost
 
@@ -145,7 +168,7 @@ Each rename goes through `/rename`, which adds a short "Session renamed to: …"
   - the conversation's messages and tool calls, through the mods API, to tell running background work, and Claude Code's list of the session's agents; for a command a subagent put in the background, that subagent's transcript (`<session id>/subagents/agent-<id>.jsonl` beside the session's), searched for its end notice;
   - the environment variables `CLAUDE_CONFIG_DIR`, `HOME` and `USERPROFILE`, to find the config folder;
   - with topic on, the paths your tools touch, a listing of the session's folder, and checks for `.git` folders above those paths.
-- **Keeps:** on disk, only the time of each session's last model check for a topic, so a restart can't call the model sooner; forgotten after 90 days. Everything else (your name under the mark, the level, the topic, the last activity, running background work, `/topic off`) is worked out from the session and its transcript each time it is needed.
+- **Keeps:** on disk, the time of each session's last model check for a topic, so a restart can't call the model sooner, forgotten after 90 days; and, while a session's name is marked, a small file for the optional wake hook, `<config>/nametag/wake/<session id>` (the marked name and the name without the mark), emptied (not deleted) when the mark comes off. Everything else (your name under the mark, the level, the topic, the last activity, running background work, `/topic off`) is worked out from the session and its transcript each time it is needed.
 - **Sends, only with topic on and only when the files don't name a project:** up to your last ten prompts and four of Claude's replies (600 characters each) and the current topic, to `topic_model`, through your session's own client and account. A secret pasted near the start of a prompt would be in that request, as it already is in the conversation. Tool output and file contents are never sent. It makes no other network calls.
 
 ## Known limits

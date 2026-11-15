@@ -16,7 +16,7 @@ function world(on: any, opts: { name?: string; size?: number; env?: Record<strin
     blocked: false, failRenames: 0, logs: [] as string[], store: new Map<string, unknown>(), gate: undefined as Promise<void> | undefined, id: ID,
     modelGate: undefined as Promise<void> | undefined, modelRefuses: false,
     agents: [] as { id: string; status: string }[], results: {} as Record<string, unknown>, agentLists: 0,
-    git: new Set<string>(), dirs: {} as Record<string, string[]>, messages: [] as { role: string; text: string }[],
+    git: new Set<string>(), files: new Map<string, string>(), dirs: {} as Record<string, string[]>, messages: [] as { role: string; text: string }[],
     answers: [] as string[], calls: [] as { effort?: string; maxTokens?: number }[], asks: 0, prompts: [] as string[], tails: 0,
     metaAt: 0, // when set, each rename also adds the meta row Claude Code writes after one, at this time
     title: (name: string) => { w.text += JSON.stringify({ type: 'custom-title', customTitle: name, sessionId: w.id }) + '\n' },
@@ -61,7 +61,8 @@ function world(on: any, opts: { name?: string; size?: number; env?: Record<strin
     return { value: w.text }
   })
   // a test runs on POSIX, where a drive path ("C:/x") reaches the fake resolved against the cwd
-  on('fs.exists', (_: unknown, e: { path: string }) => ({ value: e.path === pathOf() || w.git.has(e.path.replace(/^.*\/(?=[A-Za-z]:\/)/, '')) }))
+  on('fs.exists', (_: unknown, e: { path: string }) => ({ value: e.path === pathOf() || w.files.has(e.path) || w.git.has(e.path.replace(/^.*\/(?=[A-Za-z]:\/)/, '')) }))
+  on('fs.write', (_: unknown, e: { path: string; text: string }) => { w.files.set(e.path, e.text); return { value: undefined } })
   on('fs.list', (_: unknown, e: { path: string }) => {
     w.lists++
     if (w.dirs[e.path]) return { value: w.dirs[e.path]!.map(name => ({ name, kind: 'dir', size: 0, mtimeMs: 0, isLink: false })) }
@@ -746,18 +747,30 @@ test('the store keeps only recent model-check times; anything else is dropped', 
   expect([...w.store.keys()]).toEqual(['asked:new'])
 })
 
-test('the person\'s /rename while marked: their name stands, the record goes, the next mark waits a full idle spell', async ($, on) => {
+test('the person\'s /rename while marked: their name stands, and is not activity: the mark the idle time calls for comes back', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on, { name: 'Builder' })
   await start($)
   await clock.advance(11 * MIN)
   expect(w.renames).toEqual(['💤 Builder'])
+  await $.prompt.submit({ text: '/rename New name' } as any) // should a typed command come this way too
   await personRename($, 'New name')
-  expect(w.store.has(`mark:${ID}`)).toBe(false)
-  await clock.advance(9 * MIN)
   expect(w.renames).toEqual(['💤 Builder', 'New name'])
-  await clock.advance(2 * MIN)
+  await clock.advance(MIN)
   expect(w.renames).toEqual(['💤 Builder', 'New name', '💤 New name'])
+})
+
+test('the wake file: the marked name and the hook\'s answer while marked, emptied when awake', { options: { topic: 'on' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder [alpha]' })
+  const path = `${CONFIG}/nametag/wake/${ID}`
+  await start($)
+  expect(w.files.has(path)).toBe(false) // never marked: no file
+  await clock.advance(11 * MIN)
+  expect(w.renames).toEqual(['💤 Builder [alpha]'])
+  expect(w.files.get(path)).toBe(`"💤 Builder [alpha]"\n{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","sessionTitle":"Builder [alpha]"}}\n`)
+  await turn($, 't1')
+  expect(w.files.get(path)).toBe('')
 })
 
 test('the person\'s /rename runs while the mod\'s waits in the queue: theirs stands', async ($, on) => {

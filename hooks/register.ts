@@ -391,6 +391,26 @@ async function rename($: Engine, name: string): Promise<boolean> {
 // should be tried again later (the name couldn't be read, or the rename failed).
 type Want = { level?: number; topic?: string | null }
 
+// For the optional wake hook (extras/wake-hook.sh, a UserPromptSubmit command hook in the settings):
+// <config>/nametag/wake/<session id>, line 1 the marked name this mod set, as JSON (the hook matches
+// it against the session_title it is given), line 2 the hook's answer, the name without the mark.
+// Emptied when the name has no mark.
+async function noteWake($: Engine, marked: string | null, plain: string): Promise<void> {
+  try {
+    const config = await configDir($)
+    if (!config) return
+    const path = `${config}/nametag/wake/${await $.session.id()}`
+    if (marked === null) {
+      if (await $.fs.exists(path)) await $.fs.write(path, '')
+      return
+    }
+    const answer = { hookSpecificOutput: { hookEventName: 'UserPromptSubmit', sessionTitle: plain } }
+    await $.fs.write(path, `${JSON.stringify(marked)}\n${JSON.stringify(answer)}\n`)
+  } catch (err) {
+    $.ui.log(`nametag: wake file: ${err}`, { to: 'debug' })
+  }
+}
+
 async function render($: Engine, st: Style, want: Want): Promise<'done' | 'retry'> {
   const seen = personRenames
   const name = await currentName($)
@@ -403,10 +423,12 @@ async function render($: Engine, st: Style, want: Want): Promise<'done' | 'retry
   const target = build(now.base, st, level, topic)
   if (target === name) {
     stuck = ''
+    await noteWake($, level > 0 ? target : null, build(now.base, st, 0, topic))
     return 'done'
   }
   if (target === stuck) return 'done' // renamed to it before, and the transcript never showed it
   if (!(await rename($, target))) return 'retry'
+  await noteWake($, level > 0 ? target : null, build(now.base, st, 0, topic))
   if ((await currentName($)) !== target && personRenames === seen) stuck = target
   if (personRenames !== seen && personName && (await currentName($)) !== personName) {
     // The person's /rename ran while this one waited its turn in the command queue, and this one,
@@ -908,7 +930,8 @@ export const register: Register = (on, options) => {
   // notice of its end names its task id.
   on('prompt.submit', async ($, e, next) => {
     await adopted($, st) // first, so this turn's own work is kept
-    if (e.origin?.kind !== 'plugin') await active($)
+    // no rename is activity, should a typed /rename come this way too
+    if (e.origin?.kind !== 'plugin' && !/^\s*\/rename(\s|$)/.test(e.text)) await active($)
     if (e.origin?.kind === 'task-notification') {
       const ids = [...e.text.matchAll(TASK_ID)].map(x => x[1]!.trim())
       for (const id of Object.keys((await read($, work)) ?? {})) if (mentions(e.text, id)) ids.push(id)
@@ -935,13 +958,12 @@ export const register: Register = (on, options) => {
     return { text: `topic is ${topicOff ? 'off' : 'on'} for this session; /topic off or /topic on` }
   })
 
-  // The person renames the session: a command typed in the session, so activity. Their name is
-  // built on from the next check.
+  // The person renames the session. Not activity (no rename is): their name is noted, so a rename
+  // of this mod's that waited in the queue doesn't replace it, and built on from the next check.
   on('command.run', async ($, e, next) => {
     if (e.command !== 'rename' || e.origin?.kind === 'plugin') return next(e)
     personRenames++
     personName = e.args.trim()
-    await active($)
     return next(e)
   }).catch(($, e, next) => next(e))
 
