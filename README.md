@@ -4,7 +4,7 @@ A [Claude Code](https://claude.com/claude-code) mod that marks idle sessions, in
 
 This helps when you run several named sessions, for example in tmux or through Remote Control. You can see at a glance which ones have been quiet, and for how long.
 
-Optionally, it also ends each session's name with a short **topic**, a label for what that session is working on (`Builder · billing-api`), so you can tell your sessions apart when switching between them. See [Topic](#topic).
+Optionally, it also ends each session's name with a short **topic**, a label for what that session is working on (`Builder [billing-api]`), so you can tell your sessions apart when switching between them. See [Topic](#topic).
 
 ```
 Builder  →  10 min  →  💤 Builder  →  3 h  →  💤💤 Builder  →  12 h  →  💤💤💤 Builder
@@ -79,13 +79,14 @@ The mod checks once a minute, so each step lands within a minute of its delay. I
 Off by default. With `"topic": "on"` the mod ends the session's name with a short label for the current work, awake or asleep:
 
 ```
-Builder · billing-api        💤 Builder · billing-api        Builder 💤 · billing-api  (position: end)
+Builder [billing-api]        💤 Builder [billing-api]        Builder 💤 [billing-api]  (position: end)
 ```
 
 | Option | Default | What it does |
 | --- | --- | --- |
 | `topic` | `off` | `on` adds the topic. |
-| `topic_separator` | `·` | Text between the name and the topic, with a space on each side. Empty means just a space. |
+| `topic_separator` | empty | Text between the name and the topic, with a space on each side (for example `·`). Empty means just a space. |
+| `topic_brackets` | `[]` | Wraps the topic in `[]`, `()`, `{}` or `<>`, or `none`. |
 | `topic_freeze_hours` | `4` | After you rename the session, hours before a topic is added again. `0` for none. |
 | `topic_model` | `haiku` | The model asked when the paths don't say (an alias or a model id). |
 

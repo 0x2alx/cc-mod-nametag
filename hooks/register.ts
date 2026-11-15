@@ -11,7 +11,7 @@ import type { Mark, TopicMemory } from '../types'
 // a name (/rename was used at least once, or the session was started with --name).
 //
 // Topic (option, off by default): a short label for what the session is working on, kept at the
-// very end of the name ("Builder · billing-api", asleep "💤 Builder · billing-api"), awake or not.
+// very end of the name ("Builder [billing-api]", asleep "💤 Builder [billing-api]"), awake or not.
 // It comes from the paths the session's tools touch (a project folder that clearly leads) or, when
 // they don't say, from one small-model call on the last few messages; checked only at natural breaks
 // and at most every 30 minutes, renamed only when it changes, and held back for a while after the
@@ -94,7 +94,7 @@ export function levels(options: Record<string, unknown>): Level[] {
 // " <separator> ", the emojis optionally in brackets.
 export type Style = {
   levels: Level[]; atEnd: boolean; sep: string; open: string; close: string
-  topic: boolean; topicSep: string; freezeMs: number; topicModel: string
+  topic: boolean; topicSep: string; topicOpen: string; topicClose: string; freezeMs: number; topicModel: string
 }
 
 const BRACKETS: Record<string, [string, string]> = { '[]': ['[', ']'], '()': ['(', ')'], '{}': ['{', '}'], '<>': ['<', '>'] }
@@ -103,11 +103,14 @@ export function style(options: Record<string, unknown>): Style {
   const sep = typeof options.separator === 'string' ? options.separator.trim() : ''
   const pair = typeof options.brackets === 'string' ? BRACKETS[options.brackets.replace(/\s/g, '')] : undefined
   const hours = typeof options.topic_freeze_hours === 'number' && options.topic_freeze_hours >= 0 ? options.topic_freeze_hours : 4
+  const tb = typeof options.topic_brackets === 'string' ? options.topic_brackets : '[]'
+  const topicPair = BRACKETS[tb.replace(/\s/g, '')]
   const model = typeof options.topic_model === 'string' && options.topic_model.trim() !== '' ? options.topic_model.trim() : 'haiku'
   return {
     levels: levels(options), atEnd: options.position === 'end', sep, open: pair?.[0] ?? '', close: pair?.[1] ?? '',
     topic: options.topic === 'on',
-    topicSep: typeof options.topic_separator === 'string' ? options.topic_separator.trim() : '·',
+    topicSep: typeof options.topic_separator === 'string' ? options.topic_separator.trim() : '',
+    topicOpen: topicPair?.[0] ?? '', topicClose: topicPair?.[1] ?? '',
     freezeMs: hours * 60 * MIN_MS,
     topicModel: model,
   }
@@ -134,7 +137,8 @@ export function inName(base: string, topic: string): boolean {
 export function build(plain: string, st: Style, n: number, topic: string | null): string {
   const named = marked(plain, st, n)
   if (!topic) return named
-  return st.topicSep === '' ? `${named} ${topic}` : `${named} ${st.topicSep} ${topic}`
+  const label = st.topicOpen + topic + st.topicClose
+  return st.topicSep === '' ? `${named} ${label}` : `${named} ${st.topicSep} ${label}`
 }
 
 // ---- reading the name ----------------------------------------------------------------------

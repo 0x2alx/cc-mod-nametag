@@ -703,12 +703,12 @@ test('topic: a project that leads the edited paths names it, no model call', { o
   await edit($, '/work/demo/alpha/src/a.ts')
   await edit($, '/work/demo/alpha/b.ts')
   await turns($, clock, 3)
-  expect(w.renames).toEqual(['Builder · alpha'])
+  expect(w.renames).toEqual(['Builder [alpha]'])
   expect(w.asks).toBe(0)
   await clock.advance(11 * MIN)
-  expect(w.renames.at(-1)).toBe('💤 Builder · alpha')
+  expect(w.renames.at(-1)).toBe('💤 Builder [alpha]')
   await turn($, 'x1')
-  expect(w.renames.at(-1)).toBe('Builder · alpha')
+  expect(w.renames.at(-1)).toBe('Builder [alpha]')
 })
 
 test('topic: no clear project, so the model is asked; its answer is cleaned', { options: TOPIC }, async ($, on) => {
@@ -725,7 +725,7 @@ test('topic: no clear project, so the model is asked; its answer is cleaned', { 
   expect(w.asks).toBe(1)
   expect(w.prompts[0]).toContain('User: compare the two offers')
   expect(w.prompts[0]).not.toContain('/rename')
-  expect(w.renames).toEqual(['Builder · Web-Search'])
+  expect(w.renames).toEqual(['Builder [Web-Search]'])
 })
 
 test('topic: fewer than 3 turns, no check', { options: TOPIC }, async ($, on) => {
@@ -746,7 +746,7 @@ test('topic: SAME keeps it; no break means no check for 2 hours', { options: TOP
   w.answers = ['billing', 'SAME', 'SAME']
   await start($)
   await turns($, clock, 3)
-  expect(w.renames).toEqual(['Builder · billing'])
+  expect(w.renames).toEqual(['Builder [billing]'])
   await clock.advance(5 * MIN)
   await turns($, clock, 3, 10) // 5 minutes later: within 30 minutes, no check
   expect(w.asks).toBe(1)
@@ -757,7 +757,7 @@ test('topic: SAME keeps it; no break means no check for 2 hours', { options: TOP
   await turns($, clock, 3, 40)
   expect(w.asks).toBe(2) // 2 h passed
   expect(w.prompts[1]).toContain('Current label: billing')
-  expect(w.renames).toEqual(['Builder · billing'])
+  expect(w.renames).toEqual(['Builder [billing]'])
 })
 
 test('topic: a break (back from 💤) checks again after 30 minutes', { options: TOPIC }, async ($, on) => {
@@ -768,10 +768,10 @@ test('topic: a break (back from 💤) checks again after 30 minutes', { options:
   await start($)
   await turns($, clock, 3)
   await clock.advance(40 * MIN) // asleep
-  expect(w.renames).toEqual(['Builder · billing', '💤 Builder · billing'])
+  expect(w.renames).toEqual(['Builder [billing]', '💤 Builder [billing]'])
   await turns($, clock, 3, 10)
   expect(w.asks).toBe(2)
-  expect(w.renames).toEqual(['Builder · billing', '💤 Builder · billing', 'Builder · billing', 'Builder · invoices'])
+  expect(w.renames).toEqual(['Builder [billing]', '💤 Builder [billing]', 'Builder [billing]', 'Builder [invoices]'])
 })
 
 // Busy turns 8 minutes apart (never 10 idle minutes), for `minutes` in all.
@@ -796,7 +796,7 @@ test('topic: a check that finds nothing waits longer each time: 30 min, 1 h, 2 h
   w.answers = ['billing']
   await busyFor($, clock, 64, 'd')
   expect(w.asks).toBe(3)
-  expect(w.renames).toEqual(['Builder · billing'])
+  expect(w.renames).toEqual(['Builder [billing]'])
 })
 
 test('topic: a model that only gives the name back counts as a miss', { options: TOPIC }, async ($, on) => {
@@ -819,19 +819,19 @@ test('topic: renamed from the app (no /rename), the next check (or 💤) sees it
   await edit($, '/work/demo/alpha/a.ts')
   await edit($, '/work/demo/alpha/b.ts')
   await turns($, clock, 3)
-  expect(w.renames).toEqual(['Builder · alpha'])
+  expect(w.renames).toEqual(['Builder [alpha]'])
   w.title('Shipping')
   await edit($, '/work/demo/alpha/c.ts')
   await edit($, '/work/demo/alpha/d.ts')
   await busyFor($, clock, 32, 'z')
   expect(w.store.has(`mark:${ID}`)).toBe(true) // no break: the next check is at the 2-hour floor
   await busyFor($, clock, 96, 'a') // that check: the name is the person's now
-  expect(w.renames).toEqual(['Builder · alpha'])
+  expect(w.renames).toEqual(['Builder [alpha]'])
   expect(w.store.has(`mark:${ID}`)).toBe(false)
   await edit($, '/work/demo/alpha/e.ts')
   await edit($, '/work/demo/alpha/f.ts')
   await busyFor($, clock, 32, 'b')
-  expect(w.renames).toEqual(['Builder · alpha', 'Shipping · alpha'])
+  expect(w.renames).toEqual(['Builder [alpha]', 'Shipping [alpha]'])
 })
 
 test('topic: a search of the whole session folder says nothing', { options: TOPIC }, async ($, on) => {
@@ -867,13 +867,13 @@ test('topic: a dot folder is no project', { options: TOPIC }, async ($, on) => {
   await edit($, '/work/demo/.cache/a.ts')
   await edit($, '/work/demo/.cache/b.ts')
   await turns($, clock, 3)
-  expect(w.renames).toEqual(['Builder · setup'])
+  expect(w.renames).toEqual(['Builder [setup]'])
 })
 
 test('topic: this session\'s own record is never pruned, and its age starts over', async ($, on) => {
   mock.clock(on, { now: 100 * 24 * HOUR })
-  const w = world(on, { name: 'Builder · alpha' })
-  w.store.set(`mark:${ID}`, { set: 'Builder · alpha', base: 'Builder', at: 1, level: 0, topic: 'alpha' })
+  const w = world(on, { name: 'Builder [alpha]' })
+  w.store.set(`mark:${ID}`, { set: 'Builder [alpha]', base: 'Builder', at: 1, level: 0, topic: 'alpha' })
   await start($)
   expect((w.store.get(`mark:${ID}`) as any)?.at).toBe(100 * 24 * HOUR)
 })
@@ -886,37 +886,37 @@ test('topic: the person renames it, so topics wait 4 hours', { options: TOPIC },
   await edit($, '/work/demo/alpha/a.ts')
   await edit($, '/work/demo/alpha/b.ts')
   await turns($, clock, 3)
-  expect(w.renames).toEqual(['Builder · alpha'])
+  expect(w.renames).toEqual(['Builder [alpha]'])
   w.title('Shipping') // the person's /rename
   await clock.advance(11 * MIN) // the sleep notices the rename
-  expect(w.renames).toEqual(['Builder · alpha'])
+  expect(w.renames).toEqual(['Builder [alpha]'])
   expect(w.store.has(`freeze:${ID}`)).toBe(true)
   await edit($, '/work/demo/alpha/c.ts')
   await edit($, '/work/demo/alpha/d.ts')
   await clock.advance(30 * MIN)
   await turns($, clock, 3, 10)
-  expect(w.renames.filter(r => r.includes('·'))).toEqual(['Builder · alpha']) // held: no topic on the new name
+  expect(w.renames.filter(r => r.includes('['))).toEqual(['Builder [alpha]']) // held: no topic on the new name
   expect(w.renames.at(-1)).toBe('Shipping')
   await clock.advance(4 * HOUR)
   await turns($, clock, 3, 20)
-  expect(w.renames.at(-1)).toBe('Shipping · alpha')
+  expect(w.renames.at(-1)).toBe('Shipping [alpha]')
 })
 
 test('topic: a session restarted with a topic keeps it', { options: TOPIC }, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
-  const w = world(on, { name: 'Builder · alpha' })
-  w.store.set(`mark:${ID}`, { set: 'Builder · alpha', base: 'Builder', at: 1, level: 0, topic: 'alpha' })
+  const w = world(on, { name: 'Builder [alpha]' })
+  w.store.set(`mark:${ID}`, { set: 'Builder [alpha]', base: 'Builder', at: 1, level: 0, topic: 'alpha' })
   await start($)
   await clock.advance(MIN)
   expect(w.renames).toEqual([])
   await clock.advance(10 * MIN)
-  expect(w.renames).toEqual(['💤 Builder · alpha'])
+  expect(w.renames).toEqual(['💤 Builder [alpha]'])
 })
 
 test('topic: turned off, a topic left in a name comes off with the next rename', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
-  const w = world(on, { name: 'Builder · alpha' })
-  w.store.set(`mark:${ID}`, { set: 'Builder · alpha', base: 'Builder', at: 1, level: 0, topic: 'alpha' })
+  const w = world(on, { name: 'Builder [alpha]' })
+  w.store.set(`mark:${ID}`, { set: 'Builder [alpha]', base: 'Builder', at: 1, level: 0, topic: 'alpha' })
   await start($)
   await clock.advance(11 * MIN)
   expect(w.renames).toEqual(['💤 Builder'])
@@ -939,7 +939,7 @@ test('topic: off by default, no path noted and no model call', async ($, on) => 
   expect(w.renames).toEqual([])
 })
 
-test('topic: paths outside the root count by their repository; a separator option', { options: { topic: 'on', topic_separator: '|' } }, async ($, on) => {
+test('topic: paths outside the root count by their repository; separator and bracket options', { options: { topic: 'on', topic_separator: '|' } }, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on, { name: 'Builder' })
   w.git.add('/srv/app/.git')
@@ -947,7 +947,7 @@ test('topic: paths outside the root count by their repository; a separator optio
   await edit($, '/srv/app/server.py')
   await edit($, '/srv/app/lib/x.py', 'Write')
   await turns($, clock, 3)
-  expect(w.renames).toEqual(['Builder | app'])
+  expect(w.renames).toEqual(['Builder | [app]'])
 })
 
 test('topic: scattered paths lead nowhere, so the model decides', { options: TOPIC }, async ($, on) => {
@@ -962,9 +962,20 @@ test('topic: scattered paths lead nowhere, so the model decides', { options: TOP
   await edit($, '/home/u/notes.md')
   await turns($, clock, 3)
   expect(w.asks).toBe(1)
-  expect(w.renames).toEqual(['Builder · cleanup'])
+  expect(w.renames).toEqual(['Builder [cleanup]'])
 })
 
+
+test('topic: brackets off and a separator', { options: { topic: 'on', topic_brackets: 'none', topic_separator: '·' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  workspace(w)
+  await start($)
+  await edit($, '/work/demo/alpha/a.ts')
+  await edit($, '/work/demo/alpha/b.ts')
+  await turns($, clock, 3)
+  expect(w.renames).toEqual(['Builder · alpha'])
+})
 
 test('topic: an unnamed session is left alone, with no model call', { options: TOPIC }, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })

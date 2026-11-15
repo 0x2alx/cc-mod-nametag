@@ -1,6 +1,6 @@
 {
   "name": "nametag",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Marks an idle session's name in up to three steps (💤, 💤💤, 💤💤💤) and clears the mark at the next turn; optionally ends the name with a short topic of the current work",
   "author": {
     "name": "0x2alx"
@@ -101,8 +101,21 @@
     "topic_separator": {
       "type": "string",
       "title": "Topic separator",
-      "description": "Text between the name and the topic, with a space on each side; empty for just a space",
-      "default": "·"
+      "description": "Text between the name and the topic, with a space on each side (for example ·); empty for just a space",
+      "default": ""
+    },
+    "topic_brackets": {
+      "type": "string",
+      "title": "Topic brackets",
+      "description": "Wrap the topic in brackets",
+      "default": "[]",
+      "options": [
+        "none",
+        "[]",
+        "()",
+        "{}",
+        "<>"
+      ]
     },
     "topic_freeze_hours": {
       "type": "number",
