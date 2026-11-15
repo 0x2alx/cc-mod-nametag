@@ -54,7 +54,10 @@ const AGENT_BUSY = new Set(['pending', 'running'])
 const MIN_MS = 60 * 1000
 const TOPIC_RATE_MS = 10 * MIN_MS // at most one model check this often
 const PATH_WINDOW = 30 // the session's last this many path tool calls decide the project
-const TOPIC_MIN_PROMPTS = 2 // the model is asked only once the person has written this many prompts
+const TOPIC_MIN_PROMPTS = 3 // the model is asked only once the person has written this many prompts
+const CONTEXT_PROMPTS = 10 // the model sees up to this many of the person's last prompts...
+const CONTEXT_REPLIES = 4 // ...and of Claude's last replies...
+const CONTEXT_CHARS = 600 // ...each cut to this many characters
 const TOPIC_MAX_WAIT_MS = 120 * MIN_MS // checks that find nothing double the wait, up to this
 const TOPIC_SHARE = 0.6 // a project leads when it has this share of the path weight...
 const TOPIC_MIN_WEIGHT = 5 // ...and at least this much of it
@@ -572,17 +575,18 @@ export function leader(weights: Record<string, number>, total: number): string |
 
 const NOISE = /<(command-name|command-message|local-command|task-notification|system-reminder)|^Session renamed to/
 
-// The last few prompts and replies, one line each, oldest first: 6 of the person's, 2 of Claude's.
+// The last prompts and replies, one line each, oldest first: CONTEXT_PROMPTS of the person's,
+// CONTEXT_REPLIES of Claude's (short prompts only make sense among the others).
 export function recentLines(messages: readonly { role: string; text: string }[]): string[] {
   const out: string[] = []
   let users = 0
   let claudes = 0
-  for (let i = messages.length - 1; i >= 0 && users + claudes < 8; i--) {
+  for (let i = messages.length - 1; i >= 0 && users + claudes < CONTEXT_PROMPTS + CONTEXT_REPLIES; i--) {
     const m = messages[i]!
     const t = m.text.trim()
     if (!t || NOISE.test(t)) continue
-    if (m.role === 'user' && users < 6) { users++; out.push(`User: ${t.replace(/\s+/g, ' ').slice(0, 300)}`) }
-    else if (m.role === 'assistant' && claudes < 2) { claudes++; out.push(`Claude: ${t.replace(/\s+/g, ' ').slice(0, 300)}`) }
+    if (m.role === 'user' && users < CONTEXT_PROMPTS) { users++; out.push(`User: ${t.replace(/\s+/g, ' ').slice(0, CONTEXT_CHARS)}`) }
+    else if (m.role === 'assistant' && claudes < CONTEXT_REPLIES) { claudes++; out.push(`Claude: ${t.replace(/\s+/g, ' ').slice(0, CONTEXT_CHARS)}`) }
   }
   return out.reverse()
 }
@@ -607,22 +611,26 @@ export function cleanTopic(text: string, current: string | null, keep: 'first' |
   return label === '' ? null : label
 }
 
-const TOPIC_SYSTEM = 'You label work sessions. Reply with the label only.'
+const TOPIC_SYSTEM = 'You give work sessions a short topic. Reply with the topic only.'
 
 async function askModel($: Engine, st: Style, current: string | null, lines: string[]): Promise<string | null> {
+  const shape = maxWords === 1 ? 'a single word, like "billing" or "docs"' : 'one word, or two joined by a hyphen, like "billing-api" or "docs-site"'
   const prompt = [
-    `Current label: ${current ?? 'none'}`,
+    'The goal: a short topic that lets someone glancing at a list of their sessions tell at once what',
+    `this one is working on now. Answer with ${shape}, nothing else. The person's prompts are often`,
+    'short and only make sense together, so read them as one conversation and go by the newest work.',
     '',
-    'Recent messages:',
+    `Current topic: ${current ?? 'none'}`,
+    '',
+    'Recent messages, oldest first:',
     ...lines,
     '',
-    maxWords === 1
-      ? 'Give one short label for what this session is working on now: a single word, like "billing" or "docs". If the current label still fits, reply SAME.'
-      : 'Give one short label for what this session is working on now: one word, or two joined by a hyphen, like "billing-api" or "docs-site". If the current label still fits, reply SAME.',
+    'If the current topic still fits the work now, reply SAME.',
   ].join('\n')
   let r: Awaited<ReturnType<Engine['model']['complete']>>
   try {
-    r = await $.model.complete({ model: st.topicModel, system: TOPIC_SYSTEM, prompt, maxTokens: 20, timeoutMs: 30000 })
+    // low effort: an easy task; the room in maxTokens is for any thinking, so it can't crowd out the answer
+    r = await $.model.complete({ model: st.topicModel, system: TOPIC_SYSTEM, prompt, maxTokens: 1000, effort: 'low', timeoutMs: 30000 })
   } catch (err) {
     $.ui.log(`nametag: topic: ${err}`, { to: 'debug' }) // refused (an unknown model, say): a miss
     return null
@@ -692,7 +700,7 @@ function setTopic($: Engine, st: Style, topic: string): Promise<void> {
 // the topic, with no model call. Otherwise the model, once the person has written a couple of
 // prompts and 10 minutes have passed since its last check; a check that found nothing (the model
 // failed, or only gave the name back) doubles the wait, up to 2 hours.
-async function topicTurn($: Engine, st: Style): Promise<void> {
+async function topicTurn($: Engine, st: Style, idle = false): Promise<void> {
   if (!st.topic || !interactive || topicOff) return
   const project = await pathLeader($)
   if (project !== null) {
@@ -703,6 +711,7 @@ async function topicTurn($: Engine, st: Style): Promise<void> {
   }
   const id = await $.session.id()
   const now = await $.clock.now()
+  if (idle && (await named($, st))?.current) return // nothing new since: the topic it has stands
   const at = await $.store.get(askedKey(id))
   const since = typeof at !== 'number' || at > now ? Infinity : now - at
   if (since < Math.min(TOPIC_RATE_MS * 2 ** misses, TOPIC_MAX_WAIT_MS)) return
@@ -747,7 +756,8 @@ export const register: Register = (on, options) => {
     if (st.topic) {
       topicOff = await readTopicOff($).catch(() => false)
       await $.command.register({ name: 'topic', description: 'nametag: turn the topic at the end of this session\'s name off or on', argumentHint: 'off | on' }).catch(err => $.ui.log(`nametag: ${err}`, { to: 'debug' }))
-      topicTurn($, st).catch(err => $.ui.log(`nametag: ${err}`, { to: 'debug' }))
+      // an idle session restarted: the paths, free, but no model call when it already has a topic
+      topicTurn($, st, n > 0).catch(err => $.ui.log(`nametag: ${err}`, { to: 'debug' }))
     }
     if (st.levels.length) {
       timer = $.clock.every(CHECK_MS, () => {

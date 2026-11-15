@@ -17,7 +17,7 @@ function world(on: any, opts: { name?: string; size?: number; env?: Record<strin
     modelGate: undefined as Promise<void> | undefined, modelRefuses: false,
     agents: [] as { id: string; status: string }[], results: {} as Record<string, unknown>, agentLists: 0,
     git: new Set<string>(), dirs: {} as Record<string, string[]>, messages: [] as { role: string; text: string }[],
-    answers: [] as string[], asks: 0, prompts: [] as string[], tails: 0,
+    answers: [] as string[], calls: [] as { effort?: string; maxTokens?: number }[], asks: 0, prompts: [] as string[], tails: 0,
     metaAt: 0, // when set, each rename also adds the meta row Claude Code writes after one, at this time
     title: (name: string) => { w.text += JSON.stringify({ type: 'custom-title', customTitle: name, sessionId: w.id }) + '\n' },
     // a prompt (or reply) in the transcript at `ms`
@@ -34,8 +34,9 @@ function world(on: any, opts: { name?: string; size?: number; env?: Record<strin
   on('store.keys', () => ({ value: [...w.store.keys()] }))
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('session.messages', () => ({ value: w.messages.map((m: any) => ({ ...m, toolUses: m.toolUses ?? [] })) }))
-  on('model.complete', async (_: unknown, e: { prompt: string }) => {
+  on('model.complete', async (_: unknown, e: { prompt: string; effort?: string; maxTokens?: number }) => {
     w.asks++
+    w.calls.push({ effort: e.effort, maxTokens: e.maxTokens })
     if (w.modelGate) await w.modelGate
     if (w.modelRefuses) throw new Error('model refused')
     w.prompts.push(String(e.prompt))
@@ -861,14 +862,14 @@ test('topic: no clear project, so the model is asked; its answer is cleaned', { 
   expect(w.renames).toEqual(['Builder [Hosting]']) // one word by default
 })
 
-test('topic: fewer than 2 prompts, no model call', { options: TOPIC }, async ($, on) => {
+test('topic: fewer than 3 prompts, no model call', { options: TOPIC }, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on, { name: 'Builder' })
   w.answers = ['greeting']
   await start($)
-  await turns($, clock, 1)
+  await turns($, clock, 2)
   expect(w.asks).toBe(0)
-  await turns($, clock, 1, 1)
+  await turns($, clock, 1, 2)
   expect(w.asks).toBe(1)
 })
 
@@ -887,14 +888,40 @@ test('topic: SAME keeps it; the model is asked at most every 10 minutes', { opti
   await clock.advance(5 * MIN)
   await turns($, clock, 1, 20)
   expect(w.asks).toBe(2)
-  expect(w.prompts[1]).toContain('Current label: billing')
+  expect(w.prompts[1]).toContain('Current topic: billing')
+  expect(w.prompts[1]).toContain('The goal: a short topic')
   expect(w.renames.filter(r => !r.endsWith('[billing]'))).toEqual([])
+})
+
+test('topic: an idle restart with a topic in the name asks no model', { options: TOPIC }, async ($, on) => {
+  const clock = mock.clock(on, { now: 100 * HOUR })
+  const w = world(on, { name: 'Builder [billing]' })
+  w.row(99 * HOUR) // an hour idle
+  w.messages = [{ role: 'user', text: 'fix the billing bug' }, { role: 'user', text: 'and the invoices' }, { role: 'user', text: 'and the tax' }]
+  w.answers = ['tax']
+  await start($)
+  await clock.advance(MIN)
+  expect(w.asks).toBe(0)
+  expect(w.renames).toEqual(['💤 Builder [billing]'])
+})
+
+test('topic: an idle restart without a topic asks the model, at low effort with room to think', { options: TOPIC }, async ($, on) => {
+  const clock = mock.clock(on, { now: 100 * HOUR })
+  const w = world(on, { name: 'Builder' })
+  w.row(99 * HOUR)
+  w.messages = [{ role: 'user', text: 'fix the billing bug' }, { role: 'user', text: 'and the invoices' }, { role: 'user', text: 'and the tax' }]
+  w.answers = ['billing']
+  await start($)
+  await clock.advance(MIN)
+  expect(w.asks).toBe(1)
+  expect(w.calls).toEqual([{ effort: 'low', maxTokens: 1000 }])
+  expect(w.renames.at(-1)).toBe('💤 Builder [billing]')
 })
 
 test('topic: a restart keeps the 10-minute cap on model calls', { options: TOPIC }, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on, { name: 'Builder' })
-  w.messages = [{ role: 'user', text: 'fix the billing bug' }, { role: 'user', text: 'and the invoices' }]
+  w.messages = [{ role: 'user', text: 'fix the billing bug' }, { role: 'user', text: 'and the invoices' }, { role: 'user', text: 'and the tax' }]
   w.answers = ['billing', 'invoices']
   await start($)
   await clock.advance(MIN)
@@ -1186,12 +1213,12 @@ test('topic: the paths are checked every turn, from the first, with no model cal
 test('topic: the person renames during the model call: the topic lands on their new name', { options: TOPIC }, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on, { name: 'Builder' })
-  w.messages = [{ role: 'user', text: 'fix the billing bug' }]
+  w.messages = [{ role: 'user', text: 'fix the billing bug' }, { role: 'user', text: 'and the invoices' }]
   w.answers = ['billing']
   let open = () => {}
   w.modelGate = new Promise<void>(r => { open = r })
   await start($)
-  await turn($, 't0') // two prompts: the model is asked, and takes a while
+  await turn($, 't0') // three prompts: the model is asked, and takes a while
   await personRename($, 'Shipping')
   w.modelGate = undefined
   open()
@@ -1242,15 +1269,18 @@ test('topic: a project leads with 60% of the weight and at least 5', async () =>
   expect(leader({ a: 6 }, 12)).toBe(null) // half the weight is outside any project
 })
 
-test('topic: recent lines skip command and notice rows, 6 prompts and 2 replies at most', async () => {
+test('topic: recent lines skip command and notice rows, 10 prompts and 4 replies at most, 600 characters each', async () => {
   const msgs = [
-    ...Array.from({ length: 8 }, (_, i) => ({ role: 'user', text: `ask ${i}` })),
-    ...Array.from({ length: 3 }, (_, i) => ({ role: 'assistant', text: `reply ${i}` })),
+    ...Array.from({ length: 12 }, (_, i) => ({ role: 'user', text: `ask ${i} ${'x'.repeat(700)}` })),
+    ...Array.from({ length: 5 }, (_, i) => ({ role: 'assistant', text: `reply ${i}` })),
     { role: 'user', text: '<task-notification><task-id>b1</task-id></task-notification>' },
     { role: 'user', text: '' },
   ]
   const lines = recentLines(msgs)
-  expect(lines.filter(l => l.startsWith('User:')).length).toBe(6)
-  expect(lines.filter(l => l.startsWith('Claude:'))).toEqual(['Claude: reply 1', 'Claude: reply 2'])
+  const users = lines.filter(l => l.startsWith('User:'))
+  expect(users.length).toBe(10)
+  expect(users[0]).toStartWith('User: ask 2 ')
+  expect(users[0].length).toBe('User: '.length + 600)
+  expect(lines.filter(l => l.startsWith('Claude:'))).toEqual(['Claude: reply 1', 'Claude: reply 2', 'Claude: reply 3', 'Claude: reply 4'])
   expect(lines.join('\n')).not.toContain('task-notification')
 })
