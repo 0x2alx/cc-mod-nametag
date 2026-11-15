@@ -30,7 +30,13 @@ To try it from a local copy without installing, run `claude --plugin-dir /path/t
 
 ## Options
 
-Set them in `/config`, or in your user settings (`~/.claude/settings.json`, inside its top-level object), under the plugin's id:
+Set them in the plugin's menu: run `/plugin`, pick **nametag**, then **Configure options**. A change made there reloads the mod with the new options. From a shell, `claude plugin configure nametag` lists them, and `--values-stdin` saves new values:
+
+```
+echo '{"level1_minutes": "15", "topic": "on"}' | claude plugin configure nametag --values-stdin
+```
+
+They can also go in your user settings (`~/.claude/settings.json`, inside its top-level object), under the plugin's id; a session reads that file when it starts:
 
 ```json
 "pluginConfigs": {
@@ -87,7 +93,7 @@ Builder [billing]        💤 Builder [billing]        Builder 💤 [billing]  (
 | Option | Default | What it does |
 | --- | --- | --- |
 | `topic` | `off` | `on` adds the topic. |
-| `topic_separator` | empty | Text between the name and the topic, with a space on each side (for example `·`). Empty means just a space. |
+| `topic_separator` | empty | Text between the name and the topic, with a space on each side (for example `·`). Empty means just a space, or ` · ` when `topic_brackets` is `none`, so the topic still stands apart. |
 | `topic_brackets` | `[]` | Wraps the topic in `[]`, `()`, `{}` or `<>`, or `none`. |
 | `topic_words` | `1` | The most words in a topic: `1` or `2` (joined by `-`). |
 | `topic_model` | `haiku` | The model asked when the paths don't say (an alias or a model id). |
@@ -98,7 +104,7 @@ Builder [billing]        💤 Builder [billing]        Builder 💤 [billing]  (
 - otherwise, a repository of its own inside the session's folder; the session's own repository says nothing new, so it doesn't count;
 - outside the session's folder: the nearest repository above the file.
 
-When one project has at least 60% of the weight (and at least 5), it is the topic, with no model call. Otherwise (research, chat, files all over the place), the mod asks `topic_model` once, at low effort: the last ten prompts and four replies, about 600 characters each (short prompts only make sense among the others), with the goal stated plainly: a one-word topic (two with `topic_words: 2`) that tells someone glancing at a list of sessions what this one is working on now, or SAME if the current one still fits. The answer is cut to one line of letters, digits, `.`, `_` and `-`: `topic_words` words at most (one by default), 20 characters at most. A folder name kept to one word keeps its longest (`cc-mod-billing-api` gives `billing`); with `topic_words: 2` it keeps its last two (`billing-api`). A model's answer keeps its first words.
+When one project has at least 60% of the weight (and at least 5), it is the topic, with no model call. Otherwise (research, chat, files all over the place), the mod asks `topic_model` once, at low effort: the last ten prompts and four replies, about 600 characters each (short prompts are often clear only next to the ones around them), with the goal stated plainly: a one-word topic (two with `topic_words: 2`) that tells someone glancing at a list of sessions what this one is working on now, or SAME if the current one still fits. The answer is cut to one line of letters, digits, `.`, `_` and `-`: `topic_words` words at most (one by default), 20 characters at most. A folder name cut to one word keeps its longest word (`cc-mod-billing-api` gives `billing`); with `topic_words: 2` it keeps its last two (`billing-api`). A model's answer keeps its first words.
 
 **When it checks.** When the session starts (a restart or reload included) and at the end of each turn of the main conversation, cheapest test first. Each check reads the conversation as it stands, so nothing is lost to a restart:
 
@@ -108,9 +114,9 @@ When one project has at least 60% of the weight (and at least 5), it is the topi
 
 A check that ends with the same topic renames nothing. A topic the name already says (`alpha` in `Alpha work`) is left off.
 
-**Your own name, with the topic.** When you rename the session, the topic goes on the end of your new name at the next check. To keep a session's name free of topics, run `/topic off` in it (`/topic on` brings the topic back, `/topic` says which it is). A rename from the app or claude.ai works the same way: each check reads the name as it is then.
+**Your own name, with the topic.** When you rename the session, the topic goes on the end of your new name at the next check. To keep a session's name free of topics, run `/topic off` in it: it takes the topic off the name, and with it any bracketed word at the end that you typed yourself. `/topic on` brings the topic back and checks at once, without waiting for the 10 minutes; `/topic` says which it is. A rename from the app or claude.ai works the same way: each check reads the name as it is then.
 
-**Cost.** A path-led topic costs nothing but the rename (about 15 input tokens, as below). A model-led check sends up to about 2,300 input tokens (for English text) to `topic_model` and gets a word or two back (it may use up to 1,000 output tokens, room for any thinking at low effort), only while the files don't name a project, and at most once every 10 minutes of active work (less often while it keeps finding nothing); an idle session makes none. Unnamed sessions are never checked. The calls go through your session's own Claude Code client and count toward its cost (`/cost`), billed like your other usage at `topic_model`'s rate, so a larger model costs more per check.
+**Cost.** A path-led topic costs nothing but the rename (about 15 input tokens, as below). A model-led check sends up to about 2,300 input tokens (for English text) to `topic_model` and gets a word or two back (it may use up to 1,000 output tokens, room for any thinking at low effort), only while the files don't name a project, and at most once every 10 minutes of active work per session (less often while it keeps finding nothing); an idle session makes none. Unnamed sessions are never checked. The calls go through your session's own Claude Code client and count toward its cost (`/cost`), billed like your other usage at `topic_model`'s rate, so a larger model costs more per check.
 
 The label is whatever the model answers, cleaned as above, so now and then it may be odd. Your next rename, or the next check, replaces it.
 
@@ -123,6 +129,7 @@ The label is whatever the model answers, cleaned as above, so now and then it ma
 - **The mark matches the idle time, always.** Each check sets exactly the levels the time since the last activity calls for, whatever happened in between. The last activity is the newest prompt, reply or tool result in the session's transcript (renames, the "No response requested." a resume writes, and other bookkeeping rows don't count), kept up to date while the session runs by its prompts and turns. A start is not activity: a session started again (a restart, a reload of the mod, `--resume`, `--continue`) gets at once the mark its idle time calls for, and loses it at the end of your first turn. A session with nothing in it yet starts counting at its start.
 - **Renaming during a sleep.** If you rename a session while it is marked, your new name stands and the mod doesn't put the old one back, even when its own rename was waiting to run at that moment. A `/rename` is a command typed in the session, so it counts as activity: the idle time starts over from it. A rename from the app is not activity: at the next check, within a minute, your new name gets the mark the idle time calls for.
 - **The name it builds from.** The mod keeps nothing about the name between checks. Each time, it reads the session's name right then and takes off what it would have added itself: the mark as your options build it (or a mark of 💤s and the level emojis in another style, at the front or the end, so a change of options never stacks marks), and with topic on, a short label in the topic's brackets at the end. What's left is your name, and the new name is built from it. The transcript doesn't record who set a name, so this has a cost: a name you give that itself starts with the mark (`💤 Notes`), or with topic on ends in a bracketed word (`Notes [draft]`), is read as carrying a mark or topic, and that part is replaced.
+- **After `/clear`.** The new conversation starts fresh: background work and `/topic off` from before don't carry over.
 - **Named at launch.** `claude --name <name>` (or `-n`) counts as a name, the same as `/rename`. A name given only to `--remote-control <name>` doesn't reach the transcript, so the mod skips that session; add `--name` too, or `/rename` it once.
 
 ## Cost
@@ -133,20 +140,32 @@ Each rename goes through `/rename`, which adds a short "Session renamed to: …"
 
 ## What it reads and sends
 
-- **Reads:** this session's transcript file, for the session's name (whole if under 4 MiB, otherwise through `grep` or `findstr`), and the folder names under `<config>/projects` while it looks for that file. With topic on, it also notes the paths your tools touch and checks for `.git` folders above them.
+- **Reads, all on your machine:**
+  - this session's transcript file, for the session's name, the time of its last activity and any `/topic` command (whole if under 4 MiB, otherwise its end through `tail` and a search through `grep` or `findstr`), and the folder names under `<config>/projects` while it looks for that file. It checks the file's size and time each minute, and reads it again only when it changed or a new level is due;
+  - the conversation's messages and tool calls, through the mods API, to tell running background work, and Claude Code's list of the session's agents;
+  - the environment variables `CLAUDE_CONFIG_DIR`, `HOME` and `USERPROFILE`, to find the config folder;
+  - with topic on, the paths your tools touch, a listing of the session's folder, and checks for `.git` folders above those paths.
 - **Keeps:** on disk, only the time of each session's last model check for a topic, so a restart can't call the model sooner; forgotten after 90 days. Everything else (your name under the mark, the level, the topic, the last activity, running background work, `/topic off`) is worked out from the session and its transcript each time it is needed.
 - **Sends, only with topic on and only when the files don't name a project:** up to your last ten prompts and four of Claude's replies (600 characters each) and the current topic, to `topic_model`, through your session's own client and account. A secret pasted near the start of a prompt would be in that request, as it already is in the conversation. Tool output and file contents are never sent. It makes no other network calls.
 
 ## Known limits
 
 - **It depends on an undocumented file format.** Claude Code has no API that returns a session's name. The mod reads the name from the session's transcript file, using the newest `{"type":"custom-title","customTitle":…}` row. That format isn't documented and may change in a future Claude Code release. If it does, the mod stops renaming. It won't rename to anything wrong: when it can't read the name, it does nothing.
-- **Finding the transcript.** Transcripts live at `<config>/projects/<project folder>/<session id>.jsonl`, where `<config>` is `$CLAUDE_CONFIG_DIR` or `~/.claude`. The session id is unique, so the mod finds the file by that name. It looks first in the folder Claude Code names after the project, then in every project folder, which covers long project paths whose folder name Claude Code shortens. It remembers the path for the rest of the session. (Hook events such as `Stop` carry the exact path, but at the time of writing Claude Code's built-in security plugin doesn't pass those events to installed mods.)
-- **Large transcripts.** Mods can read files of up to 4 MiB directly. For bigger transcripts the mod reads the last 512 KiB with `tail` (Claude Code writes the name again at every prompt, so it is nearly always there) and searches the whole file with `grep` (Linux, macOS) or `findstr` (Windows) when it isn't. Windows has no `tail`: there, in a transcript over 4 MiB, the last activity comes only from what the session did since Claude Code started. Windows is untested.
+- **Finding the transcript.** Transcripts live at `<config>/projects/<project folder>/<session id>.jsonl`, where `<config>` is `$CLAUDE_CONFIG_DIR` or `~/.claude`. The session id is unique, so the mod finds the file by that name. It looks first in the folder Claude Code names after the project, then in every project folder, which covers long project paths whose folder name Claude Code shortens. It remembers the path for the rest of the session. (Hook events such as `Stop` carry the exact path, but on setups where Claude Code's built-in security plugin is active, such as managed machines, those events don't reach installed mods.)
+- **Large transcripts.** Mods can read files of up to 4 MiB directly. For bigger transcripts the mod reads the last 512 KiB with `tail` (Claude Code writes the name again at every prompt, so it is nearly always there) and searches the whole file with `grep` (Linux, macOS) or `findstr` (Windows) when it isn't. Windows has no `tail`: there, in a transcript over 4 MiB, the last activity comes only from what the session did since Claude Code started. Windows is untested, drive paths (`C:\code\...`) included.
+- **Long background commands.** A command left running in the background, a dev server for example, keeps the session awake for as long as it runs, as the work it is. Stop it (or let it end) and the idle time starts.
+- **Options in another style.** After you change `topic_brackets` or `topic_separator`, or turn the topic off in the settings, a topic already in a name in the old style is no longer recognised as one, and stays until you rename the session.
 - **Mod API.** It needs a Claude Code version with the mods API (hooks modules). It is tested on Claude Code 2.1.325, in the terminal. The desktop app and the IDE extensions run the same engine but are untested. Cloud sessions (Claude Code on the web) are untested too, and may count as headless, which the mod leaves alone.
 
-## Uninstall
+## Troubleshooting
 
-`/plugin uninstall nametag`, or `claude plugin uninstall nametag`. A session that is marked, or has a topic, at that moment keeps it: `/rename` it once to clear it.
+The mod writes what goes wrong (a transcript it can't find, a model call refused, an unknown `topic_model`) to Claude Code's debug log, never to the screen. Start Claude Code with `--debug` and look for lines starting with `nametag:`.
+
+## Update and uninstall
+
+To update: `claude plugin marketplace update cc-mod-nametag`, then `claude plugin update nametag@cc-mod-nametag`, and restart your sessions (or run `/reload-plugins` in them).
+
+To uninstall: `/plugin uninstall nametag`, or `claude plugin uninstall nametag`, then `claude plugin marketplace remove cc-mod-nametag` if you added the marketplace only for it. A session that is marked, or has a topic, at that moment keeps it: `/rename` it once to clear it.
 
 ## Development
 
@@ -155,7 +174,7 @@ claude plugin validate .
 claude plugin test .
 ```
 
-Run them from the repository with `claude` on your `PATH`; `test` needs a writable working directory and no network. The tests in `nametag.test.ts` run against a fake transcript and a mocked clock.
+Run them from the repository with `claude` on your `PATH`; `test` needs a writable working directory and no network access. The tests in `nametag.test.ts` run against a fake transcript and a mocked clock.
 
 `tsconfig.json` points at the mods API types in `.claude-plugin/types/`. Claude Code writes them there when it loads the mod (for example with `claude --plugin-dir .`), so they aren't in the repo. Until then, only your editor's type checking misses them; `validate` and `test` work without them.
 

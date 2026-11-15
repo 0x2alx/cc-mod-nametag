@@ -6,7 +6,7 @@
 //   work: background commands and workflows seen starting while this process runs, task id -> when (ms)
 //   ended: task ids seen ending (a notice, TaskStop) while this process runs
 //   inTurn: a turn of the main conversation is running
-//   from: how many rows the conversation had when this process started (-1: none yet)
+//   from: how many rows the conversation had when this process (or a /clear) started; null: not yet
 
 declare module 'claude-code' {
   interface PluginState {
@@ -17,4 +17,5 @@ declare module 'claude-code' {
   }
 }
 
+// A contract file exports types only; this one marks the file as a module.
 export type TaskIds = string[]

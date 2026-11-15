@@ -94,6 +94,11 @@ let maxWords = 1 // words in a topic, from `topic_words`
 let stuck = '' // a name this mod set that the transcript never showed: not tried again and again
 let scanAfter = 0
 let interactive = false
+let asking = false // a model check for the topic is under way
+let adoptPending = false // /clear or a resume: the process goes on under another session
+// The transcript's size and time, and the level, when a check last found the name as it should be:
+// an idle session whose transcript hasn't changed since, with no new level due, is not read again.
+let settled = { key: '', level: -1 }
 let timer: { cancel(): void } | undefined
 
 // ---- the levels and the mark ---------------------------------------------------------------
@@ -301,7 +306,7 @@ function escape(s: string): string {
 
 // The name as this mod builds it, taken apart: the person's name, the levels of the mark on it, the
 // topic at its end. A mark in another style (the options changed) is taken off too, when it is a
-// run of the level emojis or 💤 at the front. A name that only looks built ("💤 Notes", typed so)
+// run of the level emojis or 💤 at the front or the end. A name that only looks built ("💤 Notes", typed so)
 // is read the same way: the transcript can't say who set it.
 export function decompose(name: string, st: Style): { base: string; level: number; topic: string | null } {
   let rest = name
@@ -435,12 +440,18 @@ async function busy($: Engine): Promise<boolean> {
   const now = await $.clock.now()
   const gone = new Set((await read($, ended)) ?? [])
   const live = Object.entries((await read($, work)) ?? {}).filter(([id, at]) => !gone.has(id) && now - at <= WORK_MAX_MS)
-  if (live.length) return true
-  try {
-    const running = runningTasks(await $.session.messages(), (await read($, origin)) ?? 0)
+  let messages: Parameters<typeof runningTasks>[0] | undefined
+  try { messages = await $.session.messages() } catch {}
+  if (live.length) {
+    // a notice the conversation holds ends a task too (one delivered into a running turn, say)
+    const notices = (messages ?? []).filter(m => m.role === 'user' && m.text.includes('<task-id>')).map(m => m.text)
+    if (live.some(([id]) => !notices.some(t => mentions(t, id)))) return true
+  }
+  if (messages) {
+    const running = runningTasks(messages, (await read($, origin)) ?? 0)
     for (const id of gone) running.delete(id)
     if (running.size) return true
-  } catch {}
+  }
   try {
     return (await $.agent.list()).some(a => AGENT_BUSY.has(a.status))
   } catch {
@@ -464,9 +475,13 @@ async function active($: Engine): Promise<void> {
 // already has them).
 async function tick($: Engine, st: Style): Promise<void> {
   if (sleeping || (await read($, turning))) return
+  if (adoptPending) await adopt($, st)
   if (wakePending) return void serial($, () => unmark($, st))
   const now = await $.clock.now()
-  if (due(st, now - lastActivity) === 0) return
+  const cheap = due(st, now - lastActivity)
+  if (cheap === 0) return
+  const key = await transcriptKey($)
+  if (key !== '' && key === settled.key && cheap === settled.level) return // nothing new since
   const t = await transcriptActivity($)
   if (t !== null && t > lastActivity) lastActivity = Math.min(t, now)
   const n = due(st, now - lastActivity)
@@ -474,8 +489,23 @@ async function tick($: Engine, st: Style): Promise<void> {
   if (await busy($)) return active($)
   const since = lastActivity
   await serial($, async () => {
-    if (lastActivity === since) await render($, st, { level: n })
+    if (lastActivity !== since) return
+    if ((await render($, st, { level: n })) === 'retry') return // tried again at the next tick
+    // after the rename (its rows change the transcript); a level that was due by the clock alone
+    if (lastActivity === since && due(st, (await $.clock.now()) - lastActivity) === n) settled = { key: await transcriptKey($), level: n }
   })
+}
+
+// The transcript's size and modification time, '' when it can't be found.
+async function transcriptKey($: Engine): Promise<string> {
+  try {
+    const path = await transcriptPath($)
+    if (!path) return ''
+    const s = await $.fs.stat(path)
+    return s.kind === 'file' ? `${s.size}:${s.mtimeMs}` : ''
+  } catch {
+    return ''
+  }
 }
 
 // The folders above a path, nearest first ('/a/b/f' -> '/a/b', '/a').
@@ -510,10 +540,13 @@ async function hasGit($: Engine, dir: string): Promise<boolean> {
   return v
 }
 
-// A root that holds projects of its own (a folder in it has .git): each folder in it is a project.
+// A root that holds projects of its own (a folder in it has .git, the root none): each folder in it
+// is a project.
 async function isWorkspace($: Engine, root: string): Promise<boolean> {
   if (workspace?.root === root) return workspace.is
   let is = false
+  // a repository itself is one project, whatever it holds (a submodule has a .git of its own)
+  if (await hasGit($, root)) { workspace = { root, is }; return is }
   try {
     const dirs = (await $.fs.list(root)).filter(d => d.kind === 'dir' && !d.name.startsWith('.')).slice(0, 100)
     for (const d of dirs) if (await hasGit($, `${root}/${d.name}`)) { is = true; break }
@@ -527,7 +560,7 @@ async function isWorkspace($: Engine, root: string): Promise<boolean> {
 // Elsewhere: the nearest repository above it.
 async function projectOf($: Engine, path: string, isDir: boolean): Promise<string | null> {
   const p = path.replace(/\\/g, '/').replace(/\/+$/, '')
-  if (!p.startsWith('/')) return null
+  if (!/^(\/|[A-Za-z]:\/)/.test(p)) return null // absolute only: /home/... or C:/...
   const root = (await $.session.root()).replace(/\\/g, '/').replace(/\/+$/, '')
   const dirs = isDir ? [p, ...parentDirs(p)] : parentDirs(p)
   if (p === root || p.startsWith(`${root}/`)) {
@@ -598,7 +631,8 @@ export function recentLines(messages: readonly { role: string; text: string }[])
 // TOPIC_MAX_LEN characters at most. SAME keeps `current`. Null when nothing usable is left.
 export function cleanTopic(text: string, current: string | null, keep: 'first' | 'last' = 'first', most = TOPIC_MAX_WORDS): string | null {
   const line = (text.trim().split('\n')[0] ?? '').trim().replace(/^["'`*]+|["'`*.]+$/g, '')
-  if (/^same$/i.test(line)) return current
+    .replace(/^(topic|label|answer)\s*:\s*/i, '').replace(/^["'`*]+/, '') // "Topic: billing"
+  if (/^same\b/i.test(line)) return current // "SAME", "SAME (billing)"
   const slug = line
     .replace(/\s+/g, '-')
     .replace(/[^\p{L}\p{N}._-]/gu, '')
@@ -698,10 +732,11 @@ function setTopic($: Engine, st: Style, topic: string): Promise<void> {
 
 // When the session starts and at the end of each turn of the main conversation, cheapest test
 // first, from the conversation as it is then. The paths first: when one project leads them, it is
-// the topic, with no model call. Otherwise the model, once the person has written a couple of
+// the topic, with no model call. Otherwise the model, once the person has written TOPIC_MIN_PROMPTS
 // prompts and 10 minutes have passed since its last check; a check that found nothing (the model
 // failed, or only gave the name back) doubles the wait, up to 2 hours.
 async function topicTurn($: Engine, st: Style, idle = false): Promise<void> {
+  if (adoptPending) await adopt($, st)
   if (!st.topic || !interactive || topicOff) return
   const project = await pathLeader($)
   if (project !== null) {
@@ -710,6 +745,16 @@ async function topicTurn($: Engine, st: Style, idle = false): Promise<void> {
     await setTopic($, st, project)
     return
   }
+  if (asking) return // one check at a time: turns that end while one waits don't each ask
+  asking = true
+  try {
+    await askTopic($, st, idle)
+  } finally {
+    asking = false
+  }
+}
+
+async function askTopic($: Engine, st: Style, idle: boolean): Promise<void> {
   const id = await $.session.id()
   const now = await $.clock.now()
   if (idle && (await named($, st))?.current) return // nothing new since: the topic it has stands
@@ -725,6 +770,23 @@ async function topicTurn($: Engine, st: Style, idle = false): Promise<void> {
   if (label && inName(n.base, label)) label = null
   misses = label ? 0 : misses + 1
   if (label && label !== n.current) await setTopic($, st, label)
+}
+
+// The session the process goes on with after a /clear or a resume (no session.start fires for it):
+// what was known of the old one goes; this one's last activity and /topic come from its transcript,
+// and its background tasks from before died with the process that ran them.
+async function adopt($: Engine, st: Style): Promise<void> {
+  adoptPending = false
+  const now = await $.clock.now()
+  const rows = await $.session.messages().then(m => m.length, () => 0)
+  await update($, work, () => null)
+  await update($, ended, () => null)
+  await update($, origin, () => rows)
+  const t = await transcriptActivity($).catch(() => null)
+  lastActivity = t !== null && t <= now ? t : now
+  topicOff = st.topic ? await readTopicOff($).catch(() => false) : false
+  misses = 0
+  settled = { key: '', level: -1 }
 }
 
 // ---- hooks ---------------------------------------------------------------------------------
@@ -771,6 +833,7 @@ export const register: Register = (on, options) => {
   // A prompt from another plugin starts a turn of its own, which counts below. A background task's
   // notice of its end names its task id.
   on('prompt.submit', async ($, e, next) => {
+    if (adoptPending) await adopt($, st) // first, so this turn's own work is kept
     if (e.origin?.kind !== 'plugin') await active($)
     if (e.origin?.kind === 'task-notification') {
       const ids = [...e.text.matchAll(TASK_ID)].map(x => x[1]!.trim())
@@ -815,7 +878,8 @@ export const register: Register = (on, options) => {
       if (!('deny' in r && r.deny !== undefined) && !r.isError) {
         const id = startedTask(e.tool, r.result)
         const now = await $.clock.now()
-        if (id) await update($, work, w => ({ ...(w ?? {}), [id]: now }))
+        // the main loop's: a subagent's own end notices go to its loop, and it is busy while it runs
+        if (id && !e.agentId) await update($, work, w => ({ ...(w ?? {}), [id]: now }))
         if (e.tool === 'TaskStop') {
           const stopped = (r.result as { task_id?: unknown } | undefined)?.task_id
           if (typeof stopped === 'string') await update($, ended, g => [...(g ?? []), stopped])
@@ -832,6 +896,11 @@ export const register: Register = (on, options) => {
   })
   // /rename waits while a turn holds the session, so the mark comes off once the turn is done.
   // Any session clears a mark, headless ones too; only interactive ones get marked.
+  on('session.end', async ($, e, next) => {
+    if (e.reason === 'clear' || e.reason === 'resume') adoptPending = true
+    return next(e)
+  })
+
   on('turn.complete', async ($, e, next) => {
     try {
       return await next(e)

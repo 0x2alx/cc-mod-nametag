@@ -1,6 +1,6 @@
 {
   "name": "nametag",
-  "version": "0.15.2",
+  "version": "0.16.0",
   "description": "Tags each session's name with what it is doing: an idle mark (💤, 💤💤, 💤💤💤) cleared at the next turn, and optionally a short topic of the current work at the end",
   "author": {
     "name": "0x2alx"
@@ -104,7 +104,7 @@
     "topic_separator": {
       "type": "string",
       "title": "Topic separator",
-      "description": "Text between the name and the topic, with a space on each side (for example ·); empty for just a space",
+      "description": "Text between the name and the topic, with a space on each side (for example ·); empty for just a space, or · when topic_brackets is none",
       "default": ""
     },
     "topic_brackets": {
