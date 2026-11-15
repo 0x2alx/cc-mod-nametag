@@ -596,28 +596,8 @@ test('renames and bookkeeping rows are not activity; a prompt row is', async () 
   // the row Claude Code adds after each rename, as it is in a real transcript
   const meta = JSON.stringify({ type: 'user', isMeta: true, origin: { kind: 'plugin', name: 'nametag' }, message: { content: '<system-reminder>\nThe user named this session "💤 Atlas"' }, timestamp: new Date(9000).toISOString() })
   const typed = JSON.stringify({ type: 'user', isMeta: true, message: { content: '<system-reminder>\nThe user named this session "Atlas"' }, timestamp: new Date(9500).toISOString() })
-  expect(lastActivityIn([at(2000, 'assistant'), meta, typed].join('\n'))).toBe(2000) // no command row: an app's rename
-  // a /rename the person typed: the command's rows, then the meta row with no plugin origin
-  const cmd = (ms: number) => [
-    JSON.stringify({ type: 'system', subtype: 'local_command', content: '<command-name>/rename</command-name>\n<command-args>Atlas</command-args>', timestamp: new Date(ms).toISOString() }),
-    JSON.stringify({ type: 'system', subtype: 'local_command', content: '<local-command-stdout>Session renamed to: Atlas</local-command-stdout>', timestamp: new Date(ms).toISOString() }),
-  ]
-  expect(lastActivityIn([at(2000, 'assistant'), ...cmd(9500), typed].join('\n'))).toBe(9500)
-  expect(lastActivityIn([at(2000, 'assistant'), ...cmd(9000), meta].join('\n'))).toBe(2000) // this mod's own
+  expect(lastActivityIn([at(2000, 'assistant'), meta, typed].join('\n'))).toBe(2000)
   expect(lastActivityIn('{"type":"custom-title","customTitle":"x"}')).toBe(null)
-})
-
-test('a restart a minute after a typed /rename: no mark yet', async ($, on) => {
-  const clock = mock.clock(on, { now: 10 * HOUR })
-  const w = world(on, { name: 'Builder' })
-  w.row(5 * HOUR) // the last prompt, 5 hours ago
-  const ts = new Date(10 * HOUR - MIN).toISOString()
-  w.text += JSON.stringify({ type: 'system', subtype: 'local_command', content: '<command-name>/rename</command-name>\n<command-args>Builder</command-args>', timestamp: ts }) + '\n'
-  w.text += JSON.stringify({ type: 'user', isMeta: true, message: { content: '<system-reminder>\nThe user named this session "Builder"' }, timestamp: ts }) + '\n'
-  await start($)
-  expect(w.renames).toEqual([])
-  await clock.advance(10 * MIN)
-  expect(w.renames).toEqual(['💤 Builder'])
 })
 
 test('a reload in the middle of a long turn does not mark it', async ($, on) => {

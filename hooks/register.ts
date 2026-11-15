@@ -280,16 +280,6 @@ async function currentName($: Engine): Promise<string | null | undefined> {
 // conversation itself (a prompt, a reply, a tool result, a background task's notice). Renames,
 // the meta rows Claude Code adds after them, notices and bookkeeping rows don't count. Null when
 // none is found.
-// Whether a meta row is the one Claude Code adds after a /rename the person typed: no plugin
-// origin, and the command's own row just before it.
-function typedRename(row: { origin?: unknown; message?: { content?: unknown } }, lines: string[], i: number): boolean {
-  if (row.origin !== undefined || typeof row.message?.content !== 'string' || !row.message.content.includes('The user named this session')) return false
-  for (let j = i - 1; j >= Math.max(0, i - 4); j--) {
-    if (lines[j]!.includes('"subtype":"local_command"') && lines[j]!.includes('<command-name>/rename</command-name>')) return true
-  }
-  return false
-}
-
 export function lastActivityIn(text: string): number | null {
   const lines = text.split('\n')
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -297,13 +287,11 @@ export function lastActivityIn(text: string): number | null {
     if (!l.includes('"timestamp"') || !(l.includes('"type":"user"') || l.includes('"type":"assistant"'))) continue
     try {
       const row = JSON.parse(l)
-      // Not a meta row, but for the one after a /rename the person typed: Claude Code adds one after
-      // every rename ("The user named this session..."), this mod's with origin plugin, a typed one's
-      // right after the command's own rows, an app's rename none of either (not activity).
+      // Not a meta row: Claude Code adds one after every rename ("The user named this session..."),
+      // from this mod (origin plugin) or the person; a turn that follows has rows of its own.
       // Nor a synthetic reply: a resume (--continue) writes "No response requested." as model <synthetic>.
       // Nor the summary a compaction writes: Claude Code compacts an idle session on its own.
-      if (row?.isMeta === true && !typedRename(row, lines, i)) continue
-      if (row?.origin?.kind === 'plugin' || row?.message?.model === '<synthetic>' || row?.isCompactSummary === true) continue
+      if (row?.isMeta === true || row?.origin?.kind === 'plugin' || row?.message?.model === '<synthetic>' || row?.isCompactSummary === true) continue
       if ((row?.type === 'user' || row?.type === 'assistant') && typeof row.timestamp === 'string') {
         const t = Date.parse(row.timestamp)
         if (!Number.isNaN(t)) return t
