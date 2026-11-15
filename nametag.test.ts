@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { cleanTopic, decompose, lastActivityIn, lastTopicCommand, leader, mentions, recentLines, runningTasks, style } from './hooks/register'
+import { cleanTopic, decompose, lastActivityIn, lastTopicCommand, leader, mentions, recentLines, runningTasks, style, turnEndedIn } from './hooks/register'
 
 const ID = 'aaaaaaaa-0000-4000-8000-000000000001'
 const CONFIG = '/u/.claude'
@@ -787,12 +787,96 @@ test('a hot reload during a turn: the turn still counts as running', async ($, o
   const w = world(on, { name: 'Builder' })
   await start($)
   await $.turn.start({ text: 'hi', turnId: 't1' } as any)
+  w.row(1_000_000)
   await start($) // the reload
   await clock.advance(30 * MIN)
   expect(w.renames).toEqual([])
   await $.turn.complete({ answer: 'ok', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' } as any)
   await clock.advance(11 * MIN)
   expect(w.renames).toEqual(['💤 Builder'])
+})
+
+// The row Claude Code writes when a turn of the main conversation ends.
+function turnEnd(w: any, ms: number) {
+  w.text += JSON.stringify({ type: 'system', subtype: 'turn_duration', durationMs: 1, timestamp: new Date(ms).toISOString() }) + '\n'
+}
+
+test('a hot reload during a turn whose end the new load never hears: the transcript ends it', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  await start($)
+  await $.turn.start({ text: 'hi', turnId: 't1' } as any)
+  w.row(1_000_000)
+  await start($) // the reload; the engine sends this turn's end to no hook of the new load
+  w.row(1_000_000 + 10_000, 'assistant')
+  turnEnd(w, 1_000_000 + 15_000)
+  await clock.advance(9 * MIN)
+  expect(w.renames).toEqual([])
+  await clock.advance(2 * MIN)
+  expect(w.renames).toEqual(['💤 Builder'])
+  await turn($, 't2') // the next turn is heard whole again
+  expect(w.renames).toEqual(['💤 Builder', 'Builder'])
+})
+
+test('a turn a reload cut into, with no end in the transcript, is over after an hour of silence', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  await start($)
+  await $.turn.start({ text: 'hi', turnId: 't1' } as any)
+  w.row(1_000_000)
+  await start($)
+  await clock.advance(59 * MIN)
+  expect(w.renames).toEqual([])
+  await clock.advance(2 * MIN)
+  expect(w.renames).toEqual(['💤 Builder']) // the levels due by the time since the prompt
+})
+
+test('a turn a reload cut into runs on while the transcript shows no activity to judge by', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  await start($)
+  await $.turn.start({ text: 'hi', turnId: 't1' } as any)
+  await start($) // its prompt not in the transcript (yet, or past the part read)
+  await clock.advance(30 * MIN)
+  expect(w.renames).toEqual([])
+  w.row(1_000_000)
+  turnEnd(w, 1_000_000 + 31 * MIN)
+  await clock.advance(MIN)
+  expect(w.renames).toEqual(['💤 Builder'])
+})
+
+test('a turn this load heard start is not ended by the transcript', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  await start($)
+  await $.turn.start({ text: 'hi', turnId: 't1' } as any)
+  turnEnd(w, 1_000_000) // an earlier turn's end, say
+  await clock.advance(90 * MIN) // a long turn: no mark while it runs
+  expect(w.renames).toEqual([])
+})
+
+test('the summary of a compaction while idle is not activity', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  w.row(1_000_000)
+  turnEnd(w, 1_000_000)
+  await start($)
+  await clock.advance(5 * MIN)
+  w.text += JSON.stringify({ type: 'user', isCompactSummary: true, timestamp: new Date(1_000_000 + 5 * MIN).toISOString(), message: { content: 'summary' } }) + '\n'
+  await clock.advance(6 * MIN)
+  expect(w.renames).toEqual(['💤 Builder'])
+})
+
+test('turnEndedIn: the newest turn row decides; subagent rows do not', () => {
+  const at = '"timestamp":"2026-01-01T00:00:00.000Z"'
+  const prompt = `{"type":"user",${at},"message":{"content":"x"}}`
+  const end = `{"type":"system","subtype":"turn_duration",${at}}`
+  const side = `{"type":"assistant","isSidechain":true,${at},"message":{"content":"x"}}`
+  const meta = `{"type":"user","isMeta":true,${at},"message":{"content":"x"}}`
+  expect(turnEndedIn([prompt, end].join('\n'))).toBe(true)
+  expect(turnEndedIn([end, prompt].join('\n'))).toBe(false)
+  expect(turnEndedIn([prompt, end, side, meta].join('\n'))).toBe(true)
+  expect(turnEndedIn('')).toBe(false)
 })
 
 test('another session dropping this one\'s record from the shared store: the mark still comes off', async ($, on) => {

@@ -43,6 +43,7 @@ const TITLE_ROW = '"type":"custom-title"'
 const TOPIC_ROW = '<command-name>/topic</command-name>'
 const DEFAULTS: readonly [number, string][] = [[10, '💤'], [180, '💤'], [720, '💤']]
 
+const INHERITED_TURN_MAX_MS = 60 * 60 * 1000 // a turn a reload cut into, with no end in the transcript: over after this much silence
 const SCAN_RETRY_MS = 10 * 60 * 1000 // a transcript not found: search every project folder again after this
 const KEEP_DAYS = 90 // a session's last model check is forgotten after this long
 
@@ -98,6 +99,9 @@ let asking = false // a model check for the topic is under way
 let adoptPending = false // /clear or a resume: the process goes on under another session
 let adopting: Promise<void> | undefined // that switch, under way: every caller waits for the one run
 let endedAt = 0 // when the last session ended (activity after it belongs to the new one)
+// Whether this load heard the running turn start. A hook hears only the end of a turn it heard
+// start, so a turn a reload cut into ends unheard: its end is read from the transcript instead.
+let heardStart = false
 // The transcript's size and time, and the level, when a check last found the name as it should be:
 // an idle session whose transcript hasn't changed since, with no new level due, is not read again.
 let settled = { key: '', level: -1 }
@@ -285,7 +289,8 @@ export function lastActivityIn(text: string): number | null {
       // Not a meta row: Claude Code adds one after every rename ("The user named this session..."),
       // from this mod (origin plugin) or the person; a turn that follows has rows of its own.
       // Nor a synthetic reply: a resume (--continue) writes "No response requested." as model <synthetic>.
-      if (row?.isMeta === true || row?.origin?.kind === 'plugin' || row?.message?.model === '<synthetic>') continue
+      // Nor the summary a compaction writes: Claude Code compacts an idle session on its own.
+      if (row?.isMeta === true || row?.origin?.kind === 'plugin' || row?.message?.model === '<synthetic>' || row?.isCompactSummary === true) continue
       if ((row?.type === 'user' || row?.type === 'assistant') && typeof row.timestamp === 'string') {
         const t = Date.parse(row.timestamp)
         if (!Number.isNaN(t)) return t
@@ -293,6 +298,37 @@ export function lastActivityIn(text: string): number | null {
     } catch {}
   }
   return null
+}
+
+// Whether the transcript shows the main conversation's last turn ended: its newest turn row is the
+// duration Claude Code writes when a turn ends, not a prompt or a reply after it.
+export function turnEndedIn(text: string): boolean {
+  const lines = text.split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const l = lines[i]!
+    if (l.includes('"subtype":"turn_duration"')) {
+      try { if (JSON.parse(l)?.isSidechain !== true) return true } catch {}
+      continue
+    }
+    if (lastActivityIn(l) !== null) {
+      try { if (JSON.parse(l)?.isSidechain !== true) return false } catch {}
+    }
+  }
+  return false
+}
+
+// Whether a turn of the main conversation is running. One this load heard start is over when it
+// hears the end; one a reload cut into, when the transcript shows its end or has been silent for
+// INHERITED_TURN_MAX_MS. A transcript it can't read says nothing: the turn runs on.
+async function inTurn($: Engine): Promise<boolean> {
+  if (!(await read($, turning))) return false
+  if (heardStart) return true
+  const end = await transcriptEnd($)
+  const t = end ? lastActivityIn(end.text) : null
+  if (!end || t === null) return true
+  const over = turnEndedIn(end.text) || (await $.clock.now()) - t > INHERITED_TURN_MAX_MS
+  if (over) await update($, turning, () => false)
+  return !over
 }
 
 async function transcriptActivity($: Engine): Promise<number | null> {
@@ -476,7 +512,7 @@ async function active($: Engine): Promise<void> {
 // and only then the name, read right then and set to the levels due (nothing to rename when it
 // already has them).
 async function tick($: Engine, st: Style): Promise<void> {
-  if (sleeping || (await read($, turning))) return
+  if (sleeping || (await inTurn($))) return
   await adopted($, st)
   if (wakePending) return void serial($, () => unmark($, st))
   const now = await $.clock.now()
@@ -811,6 +847,7 @@ export const register: Register = (on, options) => {
     const r = await next(e)
     timer?.cancel()
     timer = undefined
+    heardStart = false
     interactive = e.isInteractive
     if (!e.isInteractive) return r
     await prune($).catch(err => $.ui.log(`nametag: ${err}`, { to: 'debug' }))
@@ -826,7 +863,7 @@ export const register: Register = (on, options) => {
       const rows = await $.session.messages().then(m => m.length, () => 0)
       await update($, origin, () => rows)
     }
-    const n = (await read($, turning)) ? 0 : due(st, now - lastActivity)
+    const n = (await inTurn($)) ? 0 : due(st, now - lastActivity)
     void serial($, () => (n === 0 ? unmark($, st) : render($, st, { level: n })))
     if (st.topic) {
       topicOff = await readTopicOff($).catch(() => false)
@@ -904,7 +941,7 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
   on('turn.start', async ($, e, next) => {
     if (!e.agentId) await adopted($, st) // a turn with no prompt before it, after a switch
-    if (!e.agentId) { await update($, turning, () => true); await active($) }
+    if (!e.agentId) { heardStart = true; await update($, turning, () => true); await active($) }
     return next(e)
   })
   // /rename waits while a turn holds the session, so the mark comes off once the turn is done.
@@ -922,6 +959,7 @@ export const register: Register = (on, options) => {
       return await next(e)
     } finally {
       if (!e.agentId) {
+        heardStart = false
         await update($, turning, () => false)
         await active($)
         // Neither awaited: the rename waits for its turn in the queue, and the topic may ask the model.
