@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { cleanTopic, decay, leader, recentLines } from './hooks/register'
+import { cleanTopic, decay, leader, mentions, recentLines } from './hooks/register'
 
 const ID = 'aaaaaaaa-0000-4000-8000-000000000001'
 const CONFIG = '/u/.claude'
@@ -12,6 +12,7 @@ function world(on: any, opts: { name?: string; size?: number; env?: Record<strin
   const w = {
     text: '{"type":"user","message":"hello"}\n', renames: [] as string[], greps: 0, reads: 0, lists: 0, attempts: 0,
     blocked: false, failRenames: 0, logs: [] as string[], store: new Map<string, unknown>(), gate: undefined as Promise<void> | undefined, id: ID,
+    modelGate: undefined as Promise<void> | undefined, modelRefuses: false,
     agents: [] as { id: string; status: string }[], results: {} as Record<string, unknown>, agentLists: 0,
     git: new Set<string>(), dirs: {} as Record<string, string[]>, messages: [] as { role: string; text: string }[],
     answers: [] as string[], asks: 0, prompts: [] as string[],
@@ -27,8 +28,10 @@ function world(on: any, opts: { name?: string; size?: number; env?: Record<strin
   on('store.keys', () => ({ value: [...w.store.keys()] }))
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('session.messages', () => ({ value: w.messages.map(m => ({ ...m, toolUses: [] })) }))
-  on('model.complete', (_: unknown, e: { prompt: string }) => {
+  on('model.complete', async (_: unknown, e: { prompt: string }) => {
     w.asks++
+    if (w.modelGate) await w.modelGate
+    if (w.modelRefuses) throw new Error('model refused')
     w.prompts.push(String(e.prompt))
     const text = w.answers.shift()
     return { value: text === undefined ? { isAnswered: false, reason: 'api-error' } : { isAnswered: true, text, usage: { input_tokens: 1, output_tokens: 1 } } }
@@ -62,10 +65,10 @@ function world(on: any, opts: { name?: string; size?: number; env?: Record<strin
     const hits = w.text.split('\n').filter(l => l.includes('"type":"custom-title"'))
     return { value: { exitCode: hits.length ? 0 : 1, stdout: hits.join('\n'), stderr: '' } }
   })
-  on('command.run', async (_: unknown, e: { command: string; args: string }) => {
+  on('command.run', async (_: unknown, e: { command: string; args: string; origin?: { kind: string } }) => {
     if (e.command === 'rename') {
       w.attempts++
-      if (w.gate) await w.gate
+      if (w.gate && e.origin?.kind !== 'composer') await w.gate // the person's own run at once
       if (w.failRenames > 0) { w.failRenames--; throw new Error('rename refused') }
       w.renames.push(e.args); title(e.args)
     }
@@ -74,18 +77,31 @@ function world(on: any, opts: { name?: string; size?: number; env?: Record<strin
   return w
 }
 
+// The person types /rename.
+async function personRename($: any, name: string) {
+  await $.command.run({ command: 'rename', args: name, origin: { kind: 'composer' } })
+  await settle()
+}
+
 // A record as the mod keeps it while a session is marked.
 function preset(w: { store: Map<string, unknown> }, id: string, set: string, base: string, at = 1_000_000) {
   w.store.set(`mark:${id}`, { set, base, at })
 }
 
+// Lets the rename jobs the mod queued without waiting for them run to their end.
+async function settle() {
+  for (let i = 0; i < 5; i++) await new Promise(r => setTimeout(r, 0))
+}
+
 async function start($: any, isInteractive = true) {
   await $.session.start({ cwd: '/work/demo', surface: 'terminal', isInteractive })
+  await settle()
 }
 
 async function turn($: any, id: string) {
   await $.turn.start({ text: 'hi', turnId: id } as any)
   await $.turn.complete({ answer: 'ok', durationMs: 1, isAborted: false, turnId: id, reason: 'answer' } as any)
+  await settle()
 }
 
 test('sleeps after 10 idle minutes and wakes after the next turn', async ($, on) => {
@@ -307,6 +323,7 @@ test('a prompt during a rename: the mark still comes off after the turn', async 
   w.gate = undefined
   open()
   await done
+  await settle() // the wake, queued behind the tick's rename
   expect(w.renames).toEqual(['💤 Builder', 'Builder'])
   await clock.advance(11 * MIN) // the reset stands: the next idle spell marks again
   expect(w.renames).toEqual(['💤 Builder', 'Builder', '💤 Builder'])
@@ -382,6 +399,11 @@ test('a double session.start leaves one timer', async ($, on) => {
   await start($)
   await clock.advance(11 * MIN)
   expect(w.attempts).toBe(1)
+  w.failRenames = 100 // the wake keeps failing: each tick tries it once
+  await turn($, 't1')
+  expect(w.attempts).toBe(2)
+  await clock.advance(3 * MIN)
+  expect(w.attempts).toBe(5) // two timers would make it 8
 })
 
 test('a truncated last row and CRLF lines', async ($, on) => {
@@ -605,6 +627,79 @@ test('records not touched for 90 days and holds that are over are dropped', asyn
   expect([...w.store.keys()]).toEqual(['mark:new', 'freeze:new'])
 })
 
+test('the person\'s /rename while marked: their name stands, the record goes, the next mark waits a full idle spell', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  await start($)
+  await clock.advance(11 * MIN)
+  expect(w.renames).toEqual(['💤 Builder'])
+  await personRename($, 'New name')
+  expect(w.store.has(`mark:${ID}`)).toBe(false)
+  await clock.advance(9 * MIN)
+  expect(w.renames).toEqual(['💤 Builder', 'New name'])
+  await clock.advance(2 * MIN)
+  expect(w.renames).toEqual(['💤 Builder', 'New name', '💤 New name'])
+})
+
+test('the person\'s /rename runs while the mod\'s waits in the queue: theirs stands', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  await start($)
+  await clock.advance(11 * MIN)
+  let open = () => {}
+  w.gate = new Promise<void>(r => { open = r })
+  await turn($, 't1') // the wake's rename now waits its turn
+  await personRename($, 'Foo') // the person's, typed earlier, runs first
+  w.gate = undefined
+  open()
+  await settle()
+  expect(w.renames).toEqual(['💤 Builder', 'Foo', 'Builder', 'Foo'])
+  expect(w.store.has(`mark:${ID}`)).toBe(false)
+  await clock.advance(11 * MIN)
+  expect(w.renames.at(-1)).toBe('💤 Foo')
+})
+
+test('a wake that fails is tried again by the next tick', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  await start($)
+  await clock.advance(11 * MIN)
+  w.failRenames = 1
+  await turn($, 't1')
+  expect(w.renames).toEqual(['💤 Builder'])
+  await clock.advance(MIN)
+  expect(w.renames).toEqual(['💤 Builder', 'Builder'])
+})
+
+test('a hot reload during a turn: the turn still counts as running', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  await start($)
+  await $.turn.start({ text: 'hi', turnId: 't1' } as any)
+  await start($) // the reload
+  await clock.advance(30 * MIN)
+  expect(w.renames).toEqual([])
+  await $.turn.complete({ answer: 'ok', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' } as any)
+  await clock.advance(11 * MIN)
+  expect(w.renames).toEqual(['💤 Builder'])
+})
+
+test('another session dropping this one\'s record from the shared store: the mark still comes off', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  await start($)
+  await clock.advance(11 * MIN)
+  w.store.delete(`mark:${ID}`)
+  await turn($, 't1')
+  expect(w.renames).toEqual(['💤 Builder', 'Builder'])
+})
+
+test('a notice ends only the task it names, as a whole word', async () => {
+  expect(mentions('<task-id>b1</task-id> done', 'b1')).toBe(true)
+  expect(mentions('<task-id>b12</task-id> done', 'b1')).toBe(false)
+  expect(mentions('task a.b+c ended', 'a.b+c')).toBe(true)
+})
+
 // ---- the topic ----
 
 const TOPIC = { topic: 'on' } as const
@@ -644,17 +739,17 @@ test('topic: no clear project, so the model is asked; its answer is cleaned', { 
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on, { name: 'Builder' })
   w.messages = [
-    { role: 'user', text: 'compare the two offers' },
-    { role: 'assistant', text: 'Offer A pays more.' },
+    { role: 'user', text: 'compare the two hosting plans' },
+    { role: 'assistant', text: 'Plan A costs less.' },
     { role: 'user', text: '<command-name>/rename</command-name>' },
   ]
-  w.answers = ['"Web Search!"']
+  w.answers = ['"Hosting Plans!"']
   await start($)
   await turns($, clock, 3)
   expect(w.asks).toBe(1)
-  expect(w.prompts[0]).toContain('User: compare the two offers')
+  expect(w.prompts[0]).toContain('User: compare the two hosting plans')
   expect(w.prompts[0]).not.toContain('/rename')
-  expect(w.renames).toEqual(['Builder [Web-Search]'])
+  expect(w.renames).toEqual(['Builder [Hosting-Plans]'])
 })
 
 test('topic: fewer than 3 turns, no check', { options: TOPIC }, async ($, on) => {
@@ -883,12 +978,12 @@ test('topic: off by default, no path noted and no model call', async ($, on) => 
 test('topic: paths outside the root count by their repository; separator and bracket options', { options: { topic: 'on', topic_separator: '|' } }, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on, { name: 'Builder' })
-  w.git.add('/srv/app/.git')
+  w.git.add('/opt/render/.git')
   await start($)
-  await edit($, '/srv/app/server.py')
-  await edit($, '/srv/app/lib/x.py', 'Write')
+  await edit($, '/opt/render/server.py')
+  await edit($, '/opt/render/lib/x.py', 'Write')
   await turns($, clock, 3)
-  expect(w.renames).toEqual(['Builder | [app]'])
+  expect(w.renames).toEqual(['Builder | [render]'])
 })
 
 test('topic: scattered paths lead nowhere, so the model decides', { options: TOPIC }, async ($, on) => {
@@ -961,9 +1056,44 @@ test('topic: the path weight halves every 10 minutes', async () => {
   expect(decay(started, 1000 + 24 * HOUR).total).toBe(0)
 })
 
+test('topic: the person renames during the model call: no topic on their name, it is held', { options: TOPIC }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  w.messages = [{ role: 'user', text: 'fix the billing bug' }]
+  w.answers = ['billing']
+  let open = () => {}
+  w.modelGate = new Promise<void>(r => { open = r })
+  await start($)
+  for (let i = 0; i < 3; i++) await turn($, `t${i}`) // the third asks the model, which takes a while
+  await personRename($, 'Shipping')
+  w.modelGate = undefined
+  open()
+  await clock.advance(MIN)
+  expect(w.asks).toBe(1)
+  expect(w.renames).toEqual(['Shipping'])
+  expect(w.store.has(`freeze:${ID}`)).toBe(true)
+})
+
+test('topic: a model call the engine refuses counts as a miss', { options: TOPIC }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  w.messages = [{ role: 'user', text: 'fix the billing bug' }]
+  w.modelRefuses = true
+  await start($)
+  await turns($, clock, 3)
+  expect(w.asks).toBe(1)
+  await clock.advance(11 * MIN)
+  await turns($, clock, 3, 10)
+  expect(w.asks).toBe(1) // a miss: 20 minutes, not 10
+  await clock.advance(8 * MIN)
+  await turns($, clock, 3, 20)
+  expect(w.asks).toBe(2)
+  expect(w.renames.filter(r => r.includes('['))).toEqual([])
+})
+
 test('topic: the label cleanup', async () => {
   expect(cleanTopic('billing api', null)).toBe('billing-api')
-  expect(cleanTopic('  "**Web Search**."\nbecause...', null)).toBe('Web-Search')
+  expect(cleanTopic('  "**Hosting Plans**."\nbecause...', null)).toBe('Hosting-Plans')
   expect(cleanTopic('SAME', 'alpha')).toBe('alpha')
   expect(cleanTopic('same.', null)).toBe(null)
   expect(cleanTopic('a-very-long-label-that-goes-on', null)).toBe('a-very')

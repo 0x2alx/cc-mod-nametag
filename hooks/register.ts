@@ -41,7 +41,9 @@ const SCAN_RETRY_MS = 10 * 60 * 1000 // a transcript not found: search every pro
 const RECORD_DAYS = 90 // records of sessions not renamed by the mod for this long are dropped
 
 const WORK_MAX_MS = 24 * 60 * 60 * 1000 // a background task whose end was never seen stops counting after this
-const AGENT_BUSY = new Set(['pending', 'running', 'waiting'])
+// Not 'waiting': that may be on a plan's approval, which waits for the person; an agent waiting on
+// its own background work is covered by that work, tracked below like any other.
+const AGENT_BUSY = new Set(['pending', 'running'])
 
 const MIN_MS = 60 * 1000
 const TOPIC_MIN_TURNS = 3 // turns since the last model check before another
@@ -66,11 +68,17 @@ const transcript = atom({ plugin: 'nametag', key: 'transcript' } as const, null)
 const topicMem = atom({ plugin: 'nametag', key: 'topic' } as const, null as TopicMemory | null)
 // Background commands and workflows still running: task id -> when it started.
 const work = atom({ plugin: 'nametag', key: 'work' } as const, null as Record<string, number> | null)
+// A turn of the main conversation is running. In the session's state so a hot reload mid-turn keeps it.
+const turning = atom({ plugin: 'nametag', key: 'inTurn' } as const, false as boolean | null)
+// This session's record as last written, so another session writing the shared store can't lose it.
+const live = atom({ plugin: 'nametag', key: 'record' } as const, null as { id: string; mark: Mark | null } | null)
 
 let lastActivity = 0
-let inTurn = false
 let reached = 0 // levels applied (or found unneeded) during this idle spell
-let sleeping: Promise<void> | undefined // a tick's rename in flight; wake waits for it
+let sleeping: Promise<void> | undefined // the rename job in flight (see serial)
+let wakePending = false // the last attempt to take the mark off must be tried again
+let personRenames = 0 // the person's /renames seen so far
+let personName = '' // the name the last of them gave
 let scanAfter = 0
 let interactive = false
 let timer: { cancel(): void } | undefined
@@ -242,9 +250,26 @@ function recordKey(id: string): string {
   return `mark:${id}`
 }
 
+function asMark(v: unknown): Mark | null {
+  const m = v as Partial<Mark> | undefined
+  return m && typeof m.set === 'string' && typeof m.base === 'string' && typeof m.at === 'number' ? (m as Mark) : null
+}
+
+// The session's own record lives in its state while it runs; the store carries it across restarts.
 async function record($: Engine, id: string): Promise<Mark | null> {
-  const v = (await $.store.get(recordKey(id))) as Partial<Mark> | undefined
-  return v && typeof v.set === 'string' && typeof v.base === 'string' && typeof v.at === 'number' ? (v as Mark) : null
+  const l = await read($, live)
+  if (l && l.id === id) return l.mark
+  return asMark(await $.store.get(recordKey(id)))
+}
+
+async function setRecord($: Engine, id: string, mark: Mark): Promise<void> {
+  await update($, live, () => ({ id, mark }))
+  await $.store.set(recordKey(id), mark)
+}
+
+async function dropRecord($: Engine, id: string): Promise<void> {
+  await update($, live, () => ({ id, mark: null }))
+  await $.store.delete(recordKey(id))
 }
 
 // Drops the records the mod hasn't touched for RECORD_DAYS (sessions ended and never resumed), and
@@ -257,10 +282,10 @@ async function prune($: Engine): Promise<void> {
     if (key === own) {
       // this session's own: kept, and its age starts over
       const mine = await record($, await $.session.id())
-      if (mine) await $.store.set(key, { ...mine, at: now } satisfies Mark)
+      if (mine) await setRecord($, await $.session.id(), { ...mine, at: now })
     } else if (key.startsWith('mark:')) {
-      const v = (await $.store.get(key)) as Partial<Mark> | undefined
-      if (!v || typeof v.at !== 'number' || v.at < cutoff) await $.store.delete(key)
+      const v = asMark(await $.store.get(key))
+      if (!v || v.at < cutoff) await $.store.delete(key)
     } else if (key.startsWith('freeze:')) {
       const until = await $.store.get(key)
       if (typeof until !== 'number' || until <= now) await $.store.delete(key)
@@ -296,13 +321,14 @@ async function frozen($: Engine): Promise<boolean> {
 type Want = { level?: number; topic?: string | null }
 
 async function render($: Engine, st: Style, want: Want): Promise<'done' | 'retry' | 'renamed'> {
+  const seen = personRenames
   const name = await currentName($)
   if (name === undefined) return 'retry'
   if (name === null || name.trim() === '') return 'done'
   const id = await $.session.id()
   const mine = await record($, id)
   if (mine && mine.set !== name) {
-    await $.store.delete(recordKey(id))
+    await dropRecord($, id)
     await freeze($, st)
     return 'renamed'
   }
@@ -312,8 +338,16 @@ async function render($: Engine, st: Style, want: Want): Promise<'done' | 'retry
   if (!st.topic || (topic && inName(base, topic))) topic = null
   const target = build(base, st, level, topic)
   if (target !== name && !(await rename($, target))) return 'retry'
-  if (target === base) await $.store.delete(recordKey(id))
-  else await $.store.set(recordKey(id), { set: target, base, at: await $.clock.now(), level, topic } satisfies Mark)
+  if (personRenames !== seen) {
+    // The person's /rename ran while this one waited its turn in the command queue, and this one,
+    // run after it, may have replaced their name: theirs stands.
+    if (personName && (await currentName($)) !== personName) await rename($, personName)
+    await dropRecord($, id)
+    await freeze($, st)
+    return 'renamed'
+  }
+  if (target === base) await dropRecord($, id)
+  else await setRecord($, id, { set: target, base, at: await $.clock.now(), level, topic })
   return 'done'
 }
 
@@ -324,17 +358,13 @@ function sleep($: Engine, st: Style, n: number): Promise<'done' | 'retry' | 'ren
 }
 
 // Takes the mark off, if the name is still the one this mod set. A name changed since (by /rename)
-// is the person's new name and stays. The topic stays.
-async function wake($: Engine, st: Style): Promise<void> {
-  await sleeping
-  return unmark($, st)
-}
-
+// is the person's new name and stays. The topic stays. One that fails is tried again by the tick.
 async function unmark($: Engine, st: Style): Promise<void> {
+  wakePending = false
   const mine = await record($, await $.session.id())
   if (!mine) return
-  if ((mine.level ?? 1) === 0) return // a topic only: nothing to take off (a record of 0.7 and earlier has no level: a mark)
-  await render($, st, { level: 0 })
+  if ((mine.level ?? 1) === 0) return // a topic only: nothing to take off (a record with no level is a mark)
+  wakePending = (await render($, st, { level: 0 })) === 'retry'
 }
 
 // ---- work in the background ----------------------------------------------------------------
@@ -364,6 +394,12 @@ async function untrack($: Engine, ended: (id: string) => boolean): Promise<void>
   if (Object.keys(left).length !== Object.keys(w).length) await update($, work, () => left)
 }
 
+// Whether a notice names the task id as a whole word ("b1" is not in "b12").
+export function mentions(text: string, id: string): boolean {
+  const esc = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`(^|[^A-Za-z0-9_-])${esc}($|[^A-Za-z0-9_-])`).test(text)
+}
+
 async function busy($: Engine): Promise<boolean> {
   const now = await $.clock.now()
   const w = (await read($, work)) ?? {}
@@ -381,7 +417,8 @@ async function busy($: Engine): Promise<boolean> {
 // running (in memory), no level due yet (the clock), work in the background (the session's state,
 // then the agent list). Only then is the transcript read, to mark the name.
 async function tick($: Engine, st: Style): Promise<void> {
-  if (sleeping || inTurn) return
+  if (sleeping || (await read($, turning))) return
+  if (wakePending) return void serial($, () => unmark($, st))
   const since = lastActivity
   const idle = (await $.clock.now()) - since
   const n = st.levels.filter(l => idle >= l.ms).length
@@ -559,9 +596,15 @@ async function askModel($: Engine, st: Style, current: string | null): Promise<s
     ...lines,
     '',
     'Give one short label for what this session is working on now: one word, or two joined by a',
-    'hyphen, like "billing-api" or "web-search". If the current label still fits, reply SAME.',
+    'hyphen, like "billing-api" or "docs-site". If the current label still fits, reply SAME.',
   ].join('\n')
-  const r = await $.model.complete({ model: st.topicModel, system: TOPIC_SYSTEM, prompt, maxTokens: 20, timeoutMs: 30000 })
+  let r: Awaited<ReturnType<Engine['model']['complete']>>
+  try {
+    r = await $.model.complete({ model: st.topicModel, system: TOPIC_SYSTEM, prompt, maxTokens: 20, timeoutMs: 30000 })
+  } catch (err) {
+    $.ui.log(`nametag: topic: ${err}`, { to: 'debug' }) // refused (an unknown model, say): a miss
+    return null
+  }
   if (!r.isAnswered) {
     $.ui.log(`nametag: topic: ${'reason' in r ? String(r.reason) : 'no answer'}`, { to: 'debug' })
     return null
@@ -571,7 +614,7 @@ async function askModel($: Engine, st: Style, current: string | null): Promise<s
 
 // The path weight halves every TOPIC_RATE_MS, so the paths of the last half hour or so decide.
 export function decay(m: TopicMemory, now: number): TopicMemory {
-  if (!m.decayedAt) return { ...m, decayedAt: now } // 0, or a memory from before 0.9
+  if (!m.decayedAt) return { ...m, decayedAt: now } // 0: not started yet
   const k = Math.floor((now - m.decayedAt) / TOPIC_RATE_MS)
   if (k <= 0) return m
   const f = k >= 20 ? 0 : 0.5 ** k
@@ -590,7 +633,7 @@ async function named($: Engine, st: Style, id: string): Promise<{ base: string; 
     if (!name || name.trim() === '') return
     const mine = await record($, id)
     if (mine && mine.set !== name) {
-      await $.store.delete(recordKey(id))
+      await dropRecord($, id)
       await freeze($, st)
       return
     }
@@ -599,12 +642,22 @@ async function named($: Engine, st: Style, id: string): Promise<{ base: string; 
   return out
 }
 
+// Puts `topic` on the name, unless the person renamed the session since `seen` (a model call can
+// take a while) or topics are held. Turn's end: the session is awake, so no mark.
+function setTopic($: Engine, st: Style, topic: string, seen: number): Promise<void> {
+  return serial($, async () => {
+    if (personRenames !== seen || (await frozen($))) return
+    await render($, st, { topic, level: 0 })
+  })
+}
+
 // At the end of each turn of the main conversation, cheapest test first. The paths first: when one
 // project leads them, it is the topic, with no model call. Otherwise the model, after 3 turns and
 // 10 minutes since its last check; a check that found nothing (the model failed, or only gave the
 // name back) doubles the wait, up to 2 hours.
 async function topicTurn($: Engine, st: Style): Promise<void> {
   if (!st.topic || !interactive) return
+  const seen = personRenames
   const now = await $.clock.now()
   await setMem($, m => ({ ...decay(m, now), turns: m.turns + 1 }))
   if (await frozen($)) return
@@ -617,7 +670,7 @@ async function topicTurn($: Engine, st: Style): Promise<void> {
     const n = await named($, st, id)
     if (!n || n.current === project || inName(n.base, project)) return
     await setMem($, x => ({ ...x, misses: 0 }))
-    await serial($, () => render($, st, { topic: project }))
+    await setTopic($, st, project, seen)
     return
   }
 
@@ -634,7 +687,7 @@ async function topicTurn($: Engine, st: Style): Promise<void> {
     return
   }
   await setMem($, x => ({ ...x, misses: 0 }))
-  if (topic !== n.current) await serial($, () => render($, st, { topic }))
+  if (topic !== n.current) await setTopic($, st, topic, seen)
 }
 
 // ---- hooks ---------------------------------------------------------------------------------
@@ -650,7 +703,6 @@ export const register: Register = (on, options) => {
     if (!e.isInteractive) return r
     await prune($).catch(err => $.ui.log(`nametag: ${err}`, { to: 'debug' }))
     await active($)
-    inTurn = false
     // A session that starts is in use: a mark it ended with (restart, resume, reload) comes off
     // now. Not awaited: a rename waits for a running turn; ticks skip and wake waits while it runs.
     void serial($, () => unmark($, st))
@@ -666,7 +718,7 @@ export const register: Register = (on, options) => {
   // notice of its end names its task id.
   on('prompt.submit', async ($, e, next) => {
     if (e.origin?.kind !== 'plugin') await active($)
-    if (e.origin?.kind === 'task-notification') await untrack($, id => e.text.includes(id))
+    if (e.origin?.kind === 'task-notification') await untrack($, id => mentions(e.text, id))
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -675,12 +727,15 @@ export const register: Register = (on, options) => {
   // waits for any rename of the mod's in flight, which may wait for this command.
   on('command.run', async ($, e, next) => {
     if (e.command !== 'rename' || e.origin?.kind === 'plugin') return next(e)
+    personRenames++
+    personName = e.args.trim()
+    await active($) // the person is here: their new name is marked after a full idle spell
     const r = await next(e)
     void serial($, async () => {
       const id = await $.session.id()
       const mine = await record($, id)
       const name = await currentName($)
-      if (mine && name !== undefined && name !== mine.set) await $.store.delete(recordKey(id))
+      if (mine && name !== undefined && name !== mine.set) await dropRecord($, id)
       await freeze($, st)
     })
     return r
@@ -707,7 +762,7 @@ export const register: Register = (on, options) => {
     return r
   }).catch(($, e, next) => next(e))
   on('turn.start', async ($, e, next) => {
-    if (!e.agentId) { inTurn = true; await active($) }
+    if (!e.agentId) { await update($, turning, () => true); await active($) }
     return next(e)
   })
   // /rename waits while a turn holds the session, so the mark comes off once the turn is done.
@@ -717,10 +772,10 @@ export const register: Register = (on, options) => {
       return await next(e)
     } finally {
       if (!e.agentId) {
-        inTurn = false
+        await update($, turning, () => false)
         await active($)
-        await wake($, st).catch(err => $.ui.log(`nametag: ${err}`, { to: 'debug' }))
-        // not awaited: it may ask the model
+        // Neither awaited: the rename waits for its turn in the queue, and the topic may ask the model.
+        void serial($, () => unmark($, st))
         topicTurn($, st).catch(err => $.ui.log(`nametag: ${err}`, { to: 'debug' }))
       }
     }

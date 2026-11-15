@@ -1,6 +1,6 @@
 {
   "name": "nametag",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Tags each session's name with what it is doing: an idle mark (💤, 💤💤, 💤💤💤) cleared at the next turn, and optionally a short topic of the current work at the end",
   "author": {
     "name": "0x2alx"
@@ -13,7 +13,10 @@
     "session",
     "idle",
     "rename",
-    "topic"
+    "topic",
+    "claude-code",
+    "tmux",
+    "session-name"
   ],
   "types": "./types/index.d.ts",
   "userConfig": {

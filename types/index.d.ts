@@ -4,6 +4,8 @@
 //   transcript: this session's transcript, once found
 //   work: background commands and workflows still running, task id -> when started (ms)
 //   topic: the topic's bookkeeping between checks (TopicMemory)
+//   inTurn: a turn of the main conversation is running
+//   record: this session's record (below) as last written, so another session's store write can't lose it
 //
 // In the mod's store (it outlives restarts), under "mark:<session id>", while the name is one the mod
 // built (marked, or with a topic):
@@ -23,6 +25,9 @@ export type TopicMemory = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'nametag': { transcript: string | null; work: Record<string, number> | null; topic: TopicMemory | null }
+    'nametag': {
+      transcript: string | null; work: Record<string, number> | null; topic: TopicMemory | null
+      inTurn: boolean | null; record: { id: string; mark: Mark | null } | null
+    }
   }
 }
