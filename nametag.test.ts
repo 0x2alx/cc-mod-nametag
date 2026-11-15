@@ -982,7 +982,7 @@ test('topic: a long folder name gives its last word, or two with topic_words: 2'
   expect(w.renames).toEqual(['Builder [billing-api]'])
 })
 
-test('topic: one word by default: a folder gives its last', { options: TOPIC }, async ($, on) => {
+test('topic: one word by default: a folder gives its longest', { options: TOPIC }, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on, { name: 'Builder' })
   w.dirs['/work/demo'] = ['cc-mod-nametag']
@@ -1196,6 +1196,9 @@ test('topic: a model call the engine refuses counts as a miss', { options: TOPIC
 })
 
 test('topic: the label cleanup', async () => {
+  expect(cleanTopic('billing-api', null, 'last', 1)).toBe('billing')
+  expect(cleanTopic('cc-mod-nametag', null, 'last', 1)).toBe('nametag')
+  expect(cleanTopic('web-search', null, 'last', 1)).toBe('search')
   expect(cleanTopic('billing api', null)).toBe('billing-api')
   expect(cleanTopic('  "**Hosting Plans**."\nbecause...', null)).toBe('Hosting-Plans')
   expect(cleanTopic('SAME', 'alpha')).toBe('alpha')

@@ -584,7 +584,8 @@ export function recentLines(messages: readonly { role: string; text: string }[])
 }
 
 // The model's answer as a label: one line, letters, digits, '.', '_' and '-', `most` words at most
-// (`keep` says which: a folder like "cc-mod-billing-api" says most in its last ones), and
+// (`keep` says which: a folder like "cc-mod-billing-api" says most in its last ones, or, kept to one
+// word, its longest), and
 // TOPIC_MAX_LEN characters at most. SAME keeps `current`. Null when nothing usable is left.
 export function cleanTopic(text: string, current: string | null, keep: 'first' | 'last' = 'first', most = TOPIC_MAX_WORDS): string | null {
   const line = (text.trim().split('\n')[0] ?? '').trim().replace(/^["'`*]+|["'`*.]+$/g, '')
@@ -595,7 +596,9 @@ export function cleanTopic(text: string, current: string | null, keep: 'first' |
     .replace(/-{2,}/g, '-')
     .replace(/^[-._]+|[-._]+$/g, '')
   const words = slug.split(/[-_]+/).filter(Boolean)
-  const two = (keep === 'last' ? words.slice(-most) : words.slice(0, most)).join('-')
+  // a folder kept to one word keeps its longest ("billing-api" gives "billing"), the last on a tie
+  const longest = words.reduce((best, w) => (w.length >= best.length ? w : best), '')
+  const two = keep === 'last' ? (most === 1 ? longest : words.slice(-most).join('-')) : words.slice(0, most).join('-')
   const label = two.slice(0, TOPIC_MAX_LEN).replace(/[-._]+$/, '')
   return label === '' ? null : label
 }

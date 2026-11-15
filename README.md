@@ -95,7 +95,7 @@ Builder [billing]        💤 Builder [billing]        Builder 💤 [billing]  (
 - otherwise, a repository of its own inside the session's folder; the session's own repository says nothing new, so it doesn't count;
 - outside the session's folder: the nearest repository above the file.
 
-When one project has at least 60% of the weight (and at least 5), it is the topic, with no model call. Otherwise (research, chat, files all over the place), the mod asks `topic_model` once: the last six prompts and two replies, about 300 characters each, and "one short label, or SAME if the current one still fits". The answer is cut to one line of letters, digits, `.`, `_` and `-`: `topic_words` words at most (one by default), 20 characters at most. A long folder name keeps its last words (`cc-mod-billing-api` gives `api`, or `billing-api` with `topic_words: 2`), a model's answer its first.
+When one project has at least 60% of the weight (and at least 5), it is the topic, with no model call. Otherwise (research, chat, files all over the place), the mod asks `topic_model` once: the last six prompts and two replies, about 300 characters each, and "one short label, or SAME if the current one still fits". The answer is cut to one line of letters, digits, `.`, `_` and `-`: `topic_words` words at most (one by default), 20 characters at most. A folder name kept to one word keeps its longest (`cc-mod-billing-api` gives `billing`); with `topic_words: 2` it keeps its last two (`billing-api`). A model's answer keeps its first words.
 
 **When it checks.** When the session starts (a restart or reload included) and at the end of each turn of the main conversation, cheapest test first. Each check reads the conversation as it stands, so nothing is lost to a restart:
 
