@@ -1306,6 +1306,9 @@ test('topic: a model answer with a preamble keeps the topic; SAME with a note ke
   expect(cleanTopic('Label: "billing api"', null, 'first', 2)).toBe('billing-api')
   expect(cleanTopic('SAME (billing)', 'docs', 'first', 1)).toBe('docs')
   expect(cleanTopic('Sameday', 'docs', 'first', 1)).toBe('Sameday')
+  expect(cleanTopic('same-origin', 'docs', 'first', 2)).toBe('same-origin')
+  expect(cleanTopic('SAME: still fits', 'docs', 'first', 1)).toBe('docs')
+  expect(cleanTopic('same-day-api', null, 'last', 1)).toBe('same') // a folder: its longest word
 })
 
 test('topic: a repository root with a submodule in it is one project, not a workspace', { options: TOPIC }, async ($, on) => {
@@ -1379,8 +1382,47 @@ test('after /clear the old session\'s background work and /topic are forgotten',
   w.title('Fresh')
   w.messages = []
   w.answers = ['alpha']
-  await clock.advance(11 * MIN)
-  expect(w.renames.at(-1)).toBe('💤 Fresh')
+  await turns($, clock, 3) // the new session's own prompts: the topic is on again, so the model is asked
+  expect(w.renames.at(-1)).toBe('Fresh [alpha]')
+  await clock.advance(11 * MIN) // and the old session's background command doesn't keep it awake
+  expect(w.renames.at(-1)).toBe('💤 Fresh [alpha]')
+})
+
+test('after /clear, work the first turn puts in the background keeps the new session awake', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  on('session.end', (_: unknown, e: { sessionId: string }) => ({ sessionId: e.sessionId }))
+  await start($)
+  await $.session.end({ reason: 'clear', sessionId: w.id } as any)
+  w.id = 'bbbbbbbb-0000-4000-8000-000000000002'
+  w.text = ''
+  w.title('Fresh')
+  w.messages = []
+  await $.prompt.submit({ text: 'start the server' } as any)
+  await $.turn.start({ text: 'start the server', turnId: 'n1' } as any)
+  await background($, w, 'Bash', { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'new1' }, { command: 'serve', run_in_background: true })
+  await $.turn.complete({ answer: 'ok', durationMs: 1, isAborted: false, turnId: 'n1', reason: 'answer' } as any)
+  await settle()
+  await clock.advance(30 * MIN)
+  expect(w.renames.filter(r => r.includes('💤'))).toEqual([])
+})
+
+test('a resume in the same process: the resumed session\'s old background tasks died with their process', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  on('session.end', (_: unknown, e: { sessionId: string }) => ({ sessionId: e.sessionId }))
+  await start($)
+  await $.session.end({ reason: 'resume', sessionId: w.id } as any)
+  w.id = 'bbbbbbbb-0000-4000-8000-000000000002'
+  w.text = ''
+  w.title('Older')
+  w.row(1_000_000 - HOUR)
+  w.messages = [
+    { role: 'user', text: 'run it' },
+    { role: 'assistant', text: '', toolUses: [{ tool: 'Bash', input: { command: 'serve', run_in_background: true }, result: { backgroundTaskId: 'gone1' } }] },
+  ]
+  await clock.advance(2 * MIN)
+  expect(w.renames.at(-1)).toBe('💤 Older')
 })
 
 test('an idle session whose transcript has not changed is not read again until a new level is due', async ($, on) => {

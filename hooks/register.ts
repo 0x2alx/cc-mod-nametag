@@ -96,6 +96,8 @@ let scanAfter = 0
 let interactive = false
 let asking = false // a model check for the topic is under way
 let adoptPending = false // /clear or a resume: the process goes on under another session
+let adopting: Promise<void> | undefined // that switch, under way: every caller waits for the one run
+let endedAt = 0 // when the last session ended (activity after it belongs to the new one)
 // The transcript's size and time, and the level, when a check last found the name as it should be:
 // an idle session whose transcript hasn't changed since, with no new level due, is not read again.
 let settled = { key: '', level: -1 }
@@ -475,7 +477,7 @@ async function active($: Engine): Promise<void> {
 // already has them).
 async function tick($: Engine, st: Style): Promise<void> {
   if (sleeping || (await read($, turning))) return
-  if (adoptPending) await adopt($, st)
+  await adopted($, st)
   if (wakePending) return void serial($, () => unmark($, st))
   const now = await $.clock.now()
   const cheap = due(st, now - lastActivity)
@@ -632,7 +634,7 @@ export function recentLines(messages: readonly { role: string; text: string }[])
 export function cleanTopic(text: string, current: string | null, keep: 'first' | 'last' = 'first', most = TOPIC_MAX_WORDS): string | null {
   const line = (text.trim().split('\n')[0] ?? '').trim().replace(/^["'`*]+|["'`*.]+$/g, '')
     .replace(/^(topic|label|answer)\s*:\s*/i, '').replace(/^["'`*]+/, '') // "Topic: billing"
-  if (/^same\b/i.test(line)) return current // "SAME", "SAME (billing)"
+  if (/^same(?![\p{L}\p{N}._-])/iu.test(line)) return current // "SAME", "SAME (billing)", not "same-origin"
   const slug = line
     .replace(/\s+/g, '-')
     .replace(/[^\p{L}\p{N}._-]/gu, '')
@@ -736,7 +738,7 @@ function setTopic($: Engine, st: Style, topic: string): Promise<void> {
 // prompts and 10 minutes have passed since its last check; a check that found nothing (the model
 // failed, or only gave the name back) doubles the wait, up to 2 hours.
 async function topicTurn($: Engine, st: Style, idle = false): Promise<void> {
-  if (adoptPending) await adopt($, st)
+  await adopted($, st)
   if (!st.topic || !interactive || topicOff) return
   const project = await pathLeader($)
   if (project !== null) {
@@ -775,17 +777,27 @@ async function askTopic($: Engine, st: Style, idle: boolean): Promise<void> {
 // The session the process goes on with after a /clear or a resume (no session.start fires for it):
 // what was known of the old one goes; this one's last activity and /topic come from its transcript,
 // and its background tasks from before died with the process that ran them.
+function adopted($: Engine, st: Style): Promise<void> {
+  if (adoptPending) {
+    adoptPending = false
+    adopting = adopt($, st).catch(err => $.ui.log(`nametag: ${err}`, { to: 'debug' })).finally(() => { adopting = undefined })
+  }
+  return adopting ?? Promise.resolve()
+}
+
 async function adopt($: Engine, st: Style): Promise<void> {
-  adoptPending = false
   const now = await $.clock.now()
   const rows = await $.session.messages().then(m => m.length, () => 0)
   await update($, work, () => null)
   await update($, ended, () => null)
   await update($, origin, () => rows)
   const t = await transcriptActivity($).catch(() => null)
-  lastActivity = t !== null && t <= now ? t : now
+  // activity seen since the switch (a /rename, say) is the new session's own and stands
+  if (lastActivity <= endedAt) lastActivity = t !== null && t <= now ? t : now
   topicOff = st.topic ? await readTopicOff($).catch(() => false) : false
   misses = 0
+  stuck = ''
+  wakePending = false
   settled = { key: '', level: -1 }
 }
 
@@ -833,7 +845,7 @@ export const register: Register = (on, options) => {
   // A prompt from another plugin starts a turn of its own, which counts below. A background task's
   // notice of its end names its task id.
   on('prompt.submit', async ($, e, next) => {
-    if (adoptPending) await adopt($, st) // first, so this turn's own work is kept
+    await adopted($, st) // first, so this turn's own work is kept
     if (e.origin?.kind !== 'plugin') await active($)
     if (e.origin?.kind === 'task-notification') {
       const ids = [...e.text.matchAll(TASK_ID)].map(x => x[1]!.trim())
@@ -891,13 +903,17 @@ export const register: Register = (on, options) => {
     return r
   }).catch(($, e, next) => next(e))
   on('turn.start', async ($, e, next) => {
+    if (!e.agentId) await adopted($, st) // a turn with no prompt before it, after a switch
     if (!e.agentId) { await update($, turning, () => true); await active($) }
     return next(e)
   })
   // /rename waits while a turn holds the session, so the mark comes off once the turn is done.
   // Any session clears a mark, headless ones too; only interactive ones get marked.
   on('session.end', async ($, e, next) => {
-    if (e.reason === 'clear' || e.reason === 'resume') adoptPending = true
+    if (e.reason === 'clear' || e.reason === 'resume') {
+      adoptPending = true
+      endedAt = await $.clock.now()
+    }
     return next(e)
   })
 
