@@ -364,7 +364,8 @@ export function decompose(name: string, st: Style): { base: string; level: numbe
   // another style: the emojis, maybe in brackets, joined by a space or a short separator of signs
   const emojis = [...new Set(['💤', ...st.levels.map(l => l.emoji)])].map(escape).join('|')
   const mark = `[[({<]?(?:${emojis})+[\\])}>]?`
-  const join = '\\s+(?:[^\\p{L}\\p{N}\\s]{1,3}\\s+)?'
+  // a separator is signs ("-", "|", "·"), never an emoji: that belongs to the name ("🫪 🤖 Marvin")
+  const join = '\\s+(?:[^\\p{L}\\p{N}\\s\\p{Extended_Pictographic}\\u{FE0F}\\u{200D}]{1,3}\\s+)?'
   const front = new RegExp(`^${mark}${join}`, 'u').exec(rest)
   if (front && rest.length > front[0].length) return { base: rest.slice(front[0].length), level: 1, topic }
   const back = new RegExp(`${join}${mark}$`, 'u').exec(rest)

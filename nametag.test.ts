@@ -1216,6 +1216,12 @@ test('the name taken apart: mark, topic, and a mark of another style', async () 
   expect(decompose('Builder | 💤💤', st)).toEqual({ base: 'Builder', level: 1, topic: null })
   expect(decompose('💤 My notes', st).base).toBe('My notes')
   expect(decompose('Builder [alpha]', style({})).topic).toBe(null)
+  // an emoji after a mark of another style is the name's own, not a separator
+  const now = style({ level1_emoji: '😴', level2_emoji: '🫪', level3_emoji: '🫪' })
+  expect(decompose('🫪 🤖 Marvin 😒', now)).toEqual({ base: '🤖 Marvin 😒', level: 1, topic: null })
+  expect(decompose('🫪 🛰️ Atlas', now)).toEqual({ base: '🛰️ Atlas', level: 1, topic: null })
+  expect(decompose('🫪 · Atlas', now)).toEqual({ base: 'Atlas', level: 1, topic: null })
+  expect(decompose('Atlas 🤖 🫪', now)).toEqual({ base: 'Atlas 🤖', level: 1, topic: null })
 })
 
 test('/topic off or on: the last such command in the transcript', async () => {
