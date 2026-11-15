@@ -8,9 +8,10 @@ import type { Mark, TopicMemory } from '../types'
 // Idle mark (on by default): marks an idle session's name in up to three steps. Each level has a delay and an
 // emoji: after level 1's delay with no prompt and no turn the name becomes "💤 name", after level
 // 2's "💤💤 name", after level 3's "💤💤💤 name" (via /rename). Options put the mark after the
-// name, join it with a separator, or wrap it in brackets. At the end of the next turn, or when the
-// session starts again, the mark comes off. Interactive sessions only, and only sessions that have
-// a name (/rename was used at least once, or the session was started with --name).
+// name, join it with a separator, or wrap it in brackets. The mark always matches the time since
+// the last activity, a restart included; at the end of the next turn it comes off. Interactive
+// sessions only, and only sessions that have a name (/rename was used at least once, or the session
+// was started with --name).
 //
 // Topic (option, off by default): a short label for what the session is working on, kept at the
 // very end of the name ("Builder [billing-api]", asleep "💤 Builder [billing-api]"), awake or not.
@@ -732,7 +733,8 @@ export const register: Register = (on, options) => {
       reached = 0
     } else await active($)
     const since = lastActivity
-    const n = st.levels.filter(l => now - since >= l.ms).length
+    // A reload in the middle of a turn: that turn is activity, and its end takes any mark off.
+    const n = (await read($, turning)) ? 0 : st.levels.filter(l => now - since >= l.ms).length
     void serial($, async () => {
       if (n === 0) return unmark($, st)
       if ((await render($, st, { level: n })) === 'done' && lastActivity === since) reached = n

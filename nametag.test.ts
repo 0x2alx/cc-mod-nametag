@@ -540,6 +540,16 @@ test('a restart soon after activity: no mark yet, and the next comes when the id
   expect(w.renames).toEqual(['Builder', '💤 Builder'])
 })
 
+test('a reload in the middle of a long turn does not mark it', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  await start($)
+  await $.turn.start({ text: 'hi', turnId: 't1' } as any)
+  await clock.advance(20 * MIN)
+  await start($) // the reload, 20 minutes into the turn
+  expect(w.renames).toEqual([])
+})
+
 test('activity is saved, so a reload keeps the idle time running', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on, { name: 'Builder' })

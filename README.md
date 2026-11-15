@@ -130,7 +130,7 @@ Each rename goes through `/rename`, which adds a short "Session renamed to: …"
 ## What it reads and sends
 
 - **Reads:** this session's transcript file, for the session's name (whole if under 4 MiB, otherwise through `grep` or `findstr`), and the folder names under `<config>/projects` while it looks for that file. With topic on, it also notes the paths your tools touch and checks for `.git` folders above them.
-- **Keeps:** in its own store, for each session it renamed, the name it set, your name under it, the mark level and the topic, and when the session last had activity; dropped after 90 days untouched.
+- **Keeps:** in its own store, for each session it renamed, the name it set, your name under it, the mark level and the topic; and for each interactive session, when it last had activity. Entries untouched for 90 days are dropped.
 - **Sends, only with topic on and only when the files don't name a project:** up to your last six prompts and two of Claude's replies (300 characters each) and the current label, to `topic_model`, through your session's own client and account. A secret pasted near the start of a prompt would be in that request, as it already is in the conversation. Tool output and file contents are never sent. It makes no other network calls.
 
 ## Known limits
@@ -138,7 +138,7 @@ Each rename goes through `/rename`, which adds a short "Session renamed to: …"
 - **It depends on an undocumented file format.** Claude Code has no API that returns a session's name. The mod reads the name from the session's transcript file, using the newest `{"type":"custom-title","customTitle":…}` row. That format isn't documented and may change in a future Claude Code release. If it does, the mod stops renaming. It won't rename to anything wrong: when it can't read the name, it does nothing.
 - **Finding the transcript.** Transcripts live at `<config>/projects/<project folder>/<session id>.jsonl`, where `<config>` is `$CLAUDE_CONFIG_DIR` or `~/.claude`. The session id is unique, so the mod finds the file by that name. It looks first in the folder Claude Code names after the project, then in every project folder, which covers long project paths whose folder name Claude Code shortens. It remembers the path for the rest of the session. (Hook events such as `Stop` carry the exact path, but at the time of writing Claude Code's built-in security plugin doesn't pass those events to installed mods.)
 - **Large transcripts.** Mods can read files of up to 4 MiB directly. For bigger transcripts the mod runs `grep` (Linux, macOS), falling back to `findstr` (Windows). Windows is untested.
-- **Mod API.** It needs a Claude Code version with the mods API (hooks modules). It is tested on Claude Code 2.1.325.
+- **Mod API.** It needs a Claude Code version with the mods API (hooks modules). It is tested on Claude Code 2.1.325, in the terminal. The desktop app and the IDE extensions run the same engine but are untested. Cloud sessions (Claude Code on the web) are untested too, and may count as headless, which the mod leaves alone.
 
 ## Uninstall
 
