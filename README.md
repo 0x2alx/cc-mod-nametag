@@ -1,10 +1,9 @@
 # nametag
 
-A [Claude Code](https://claude.com/claude-code) mod that marks idle sessions, in up to three steps. When a session has had no prompt and no turn for 10 minutes, it puts `💤 ` in front of the session's name; after 3 hours the mark becomes `💤💤 `, after 12 hours `💤💤💤 `. When the next turn ends, or the session is started again (restart, resume), it takes the mark off again. The delays and the emoji of each step are options.
+A [Claude Code](https://claude.com/claude-code) mod that tags each session's name with what it is doing, so you can tell your sessions apart at a glance when you run several of them, for example in tmux or through Remote Control. It keeps two tags, each with its own options:
 
-This helps when you run several named sessions, for example in tmux or through Remote Control. You can see at a glance which ones have been quiet, and for how long.
-
-Optionally, it also ends each session's name with a short **topic**, a label for what that session is working on (`Builder [billing-api]`), so you can tell your sessions apart when switching between them. See [Topic](#topic).
+- **Idle mark** (on by default). When a session has had no prompt and no turn for 10 minutes, it puts `💤 ` in front of the session's name; after 3 hours the mark becomes `💤💤 `, after 12 hours `💤💤💤 `. When the next turn ends, or the session is started again (restart, resume), it takes the mark off again. The delays and the emoji of each step are options.
+- **Topic** (off by default). It ends the name with a short label for what that session is working on (`Builder [billing-api]`), taken from the files it touches or, when they don't say, from a small model. See [Topic](#topic).
 
 ```
 Builder  →  10 min  →  💤 Builder  →  3 h  →  💤💤 Builder  →  12 h  →  💤💤💤 Builder

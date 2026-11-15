@@ -1,1 +1,1 @@
-{"name": "cc-mod-nametag", "owner": {"name": "0x2alx"}, "description": "nametag: a Claude Code mod that marks idle sessions' names with 💤", "plugins": [{"name": "nametag", "source": "./"}]}
+{"name": "cc-mod-nametag", "owner": {"name": "0x2alx"}, "description": "nametag: a Claude Code mod that tags session names with an idle mark (💤) and a short topic of the current work", "plugins": [{"name": "nametag", "source": "./"}]}

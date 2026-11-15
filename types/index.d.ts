@@ -2,7 +2,6 @@
 //
 // In the session's state (it outlives a hot reload of the mod):
 //   transcript: this session's transcript, once found
-//   level: written by 0.5 and earlier; read once on upgrade, then cleared
 //   work: background commands and workflows still running, task id -> when started (ms)
 //   topic: the topic's bookkeeping between checks (TopicMemory)
 //
@@ -24,6 +23,6 @@ export type TopicMemory = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'nametag': { transcript: string | null; level: number | null; work: Record<string, number> | null; topic: TopicMemory | null }
+    'nametag': { transcript: string | null; work: Record<string, number> | null; topic: TopicMemory | null }
   }
 }
