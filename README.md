@@ -86,10 +86,9 @@ Builder [billing-api]        💤 Builder [billing-api]        Builder 💤 [bil
 | `topic` | `off` | `on` adds the topic. |
 | `topic_separator` | empty | Text between the name and the topic, with a space on each side (for example `·`). Empty means just a space. |
 | `topic_brackets` | `[]` | Wraps the topic in `[]`, `()`, `{}` or `<>`, or `none`. |
-| `topic_freeze_hours` | `4` | After you rename the session, hours before a topic is added again, up to 168. `0` for none. |
 | `topic_model` | `haiku` | The model asked when the paths don't say (an alias or a model id). |
 
-**Where the topic comes from.** First, for free, the files the session works on. The mod notes the path of every `Edit`, `Write` and `NotebookEdit` (weight 3) and every `Read`, and `Grep` or `Glob` given a path (weight 1), the session's agents included, and maps each to a project:
+**Where the topic comes from.** First, for free, the files the session works on. At each check the mod reads the conversation as it stands and takes the paths of its last 30 `Edit`, `Write` and `NotebookEdit` calls (weight 3) and `Read`, and `Grep` or `Glob` given a path (weight 1), in the main conversation, and maps each to a project:
 
 - under the session's folder, if that folder holds projects of its own (a folder in it has `.git`): the folder in it, so `~/work/billing-api/src/a.ts` gives `billing-api` (dot folders don't count);
 - otherwise, a repository of its own inside the session's folder; the session's own repository says nothing new, so it doesn't count;
@@ -97,16 +96,15 @@ Builder [billing-api]        💤 Builder [billing-api]        Builder 💤 [bil
 
 When one project has at least 60% of the weight (and at least 5), it is the topic, with no model call. Otherwise (research, chat, files all over the place), the mod asks `topic_model` once: the last six prompts and two replies, about 300 characters each, and "one short label, or SAME if the current one still fits". The answer is cut to one line of letters, digits, `.`, `_` and `-`: two words at most, 20 characters at most. A long folder name keeps its last two words (`cc-mod-billing-api` gives `billing-api`).
 
-**When it checks.** At the end of each turn of the main conversation, cheapest test first:
+**When it checks.** When the session starts (a restart or reload included) and at the end of each turn of the main conversation, cheapest test first. Each check reads the conversation as it stands, so nothing is lost to a restart:
 
-1. topic off, or a headless session: no;
-2. within `topic_freeze_hours` of you renaming the session: no;
-3. the paths, every turn (free): one project leads, so it is the topic. The path weight halves every 10 minutes, so the last half hour or so of work decides, and a switch to another project shows within a few edits;
-4. no project leads: the model, once 3 turns and 10 minutes have passed since its last check (after a check that found nothing, 20 minutes, then 40, up to 2 hours).
+1. topic off, turned off for this session with `/topic off`, or a headless session: no;
+2. the paths (free): one project leads, so it is the topic. Only the last 30 path calls count, so a switch to another project shows within a few edits;
+3. no project leads: the model, once you have written at least two prompts and 10 minutes have passed since its last check (after a check that found nothing, 20 minutes, then 40, up to 2 hours). The time of the last check is kept across restarts.
 
 A check that ends with the same topic renames nothing. A topic the name already says (`alpha` in `Alpha work`) is left off.
 
-**Your own name wins.** When you rename the session, your name stands alone, without a topic, for `topic_freeze_hours`; at the next check after that, the topic comes back at the end of your new name. A `/rename` is seen at once; a rename from the app or claude.ai is seen at the next topic change, model check or 💤. The mod never reads a topic back out of a name: like the mark, it keeps the topic in its record and builds the whole name each time.
+**Your own name, with the topic.** When you rename the session, the topic goes on the end of your new name at the next check. To keep a session's name free of topics, run `/topic off` in it (`/topic on` brings the topic back, `/topic` says which it is). A `/rename` is seen at once; a rename from the app or claude.ai is seen at the next topic change, model check or 💤. The mod never reads a topic back out of a name: like the mark, it keeps the topic in its record and builds the whole name each time.
 
 **Cost.** A path-led topic costs nothing but the rename (about 15 input tokens, as below). A model-led check sends up to about 700 input tokens (for English text) to `topic_model` and gets at most 20 back, only while the files don't name a project, and at most once every 10 minutes of active work (less often while it keeps finding nothing); an idle session makes none. Unnamed sessions are never checked. The calls go through your session's own Claude Code client and count toward its cost (`/cost`), billed like your other usage at `topic_model`'s rate, so a larger model costs more per check.
 

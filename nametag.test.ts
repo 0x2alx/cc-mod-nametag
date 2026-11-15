@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { cleanTopic, decay, leader, mentions, recentLines } from './hooks/register'
+import { cleanTopic, leader, mentions, recentLines } from './hooks/register'
 
 const ID = 'aaaaaaaa-0000-4000-8000-000000000001'
 const CONFIG = '/u/.claude'
@@ -8,6 +8,8 @@ const MIN = 60 * 1000
 const HOUR = 60 * MIN
 
 // A fake world beneath the mod: one transcript, /rename appending a title row to it.
+let current: any // the world of the test that runs
+
 function world(on: any, opts: { name?: string; size?: number; env?: Record<string, string>; path?: string } = {}) {
   const w = {
     text: '{"type":"user","message":"hello"}\n', renames: [] as string[], greps: 0, reads: 0, lists: 0, attempts: 0,
@@ -19,6 +21,7 @@ function world(on: any, opts: { name?: string; size?: number; env?: Record<strin
     title: (name: string) => { w.text += JSON.stringify({ type: 'custom-title', customTitle: name, sessionId: w.id }) + '\n' },
   }
   const pathOf = () => opts.path ?? `${CONFIG}/projects/-work-demo/${w.id}.jsonl`
+  current = w
   const title = w.title
   if (opts.name !== undefined) title(opts.name)
   mock.env(on, opts.env ?? { CLAUDE_CONFIG_DIR: CONFIG })
@@ -27,7 +30,7 @@ function world(on: any, opts: { name?: string; size?: number; env?: Record<strin
   on('store.delete', (_: unknown, e: { key: string }) => { w.store.delete(e.key); return { value: undefined } })
   on('store.keys', () => ({ value: [...w.store.keys()] }))
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
-  on('session.messages', () => ({ value: w.messages.map(m => ({ ...m, toolUses: [] })) }))
+  on('session.messages', () => ({ value: w.messages.map((m: any) => ({ ...m, toolUses: m.toolUses ?? [] })) }))
   on('model.complete', async (_: unknown, e: { prompt: string }) => {
     w.asks++
     if (w.modelGate) await w.modelGate
@@ -39,7 +42,7 @@ function world(on: any, opts: { name?: string; size?: number; env?: Record<strin
   on('agent.list', () => (w.agentLists++, { value: w.agents.map(a => ({ description: 'x', type: 'general-purpose', ...a })) }))
   on('tool.call', (_: unknown, e: { tool: string }) => ({ result: w.results[e.tool] ?? {} }))
   on('prompt.submit', (_: unknown, e: { text: string }) => ({ text: e.text }))
-  on('turn.start', (_: unknown, e: { turnId: string }) => ({ turnId: e.turnId }))
+  on('turn.start', (_: unknown, e: { turnId: string; text: string }) => (w.messages.push({ role: 'user', text: e.text }), { turnId: e.turnId }))
   on('turn.complete', (_: unknown, e: { answer: string }) => ({ text: e.answer }))
   on('ui.log', (_: unknown, e: { text: string }) => { w.logs.push(e.text); return { value: undefined } })
   on('session.id', () => ({ value: w.id }))
@@ -672,15 +675,16 @@ test('no level due: the tick ends before asking about agents or reading the tran
   expect(w.renames).toEqual(['💤 Builder'])
 })
 
-test('records not touched for 90 days and holds that are over are dropped', async ($, on) => {
+test('records and saved times not touched for 90 days are dropped', async ($, on) => {
   mock.clock(on, { now: 100 * 24 * HOUR })
   const w = world(on, { name: 'Builder' })
   preset(w, 'old', 'x', 'y', 1)
   preset(w, 'new', 'x', 'y', 99 * 24 * HOUR)
-  w.store.set('freeze:old', 100 * 24 * HOUR - 1)
-  w.store.set('freeze:new', 100 * 24 * HOUR + HOUR)
+  w.store.set('seen:old', 1)
+  w.store.set('asked:old', { at: 1, misses: 0 })
+  w.store.set('notopic:new', 99 * 24 * HOUR)
   await start($)
-  expect([...w.store.keys()]).toEqual(['mark:new', 'freeze:new', `seen:${ID}`])
+  expect([...w.store.keys()]).toEqual(['mark:new', 'notopic:new', `seen:${ID}`])
 })
 
 test('the person\'s /rename while marked: their name stands, the record goes, the next mark waits a full idle spell', async ($, on) => {
@@ -766,8 +770,10 @@ function workspace(w: any) {
   w.git.add('/work/demo/alpha/.git')
 }
 
-async function edit($: any, path: string, tool = 'Edit') {
-  await $.tool.call({ tool, file_path: path, old_string: 'a', new_string: 'b' })
+// A tool call with a path, as the conversation holds it.
+async function edit(_$: any, path: string, tool = 'Edit') {
+  const field = tool === 'Grep' || tool === 'Glob' ? 'path' : 'file_path'
+  current.messages.push({ role: 'assistant', text: '', toolUses: [{ tool, input: { [field]: path } }] })
 }
 
 async function turns($: any, clock: any, n: number, from = 0) {
@@ -808,34 +814,47 @@ test('topic: no clear project, so the model is asked; its answer is cleaned', { 
   expect(w.renames).toEqual(['Builder [Hosting-Plans]'])
 })
 
-test('topic: fewer than 3 turns, no check', { options: TOPIC }, async ($, on) => {
+test('topic: fewer than 2 prompts, no model call', { options: TOPIC }, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on, { name: 'Builder' })
-  w.messages = [{ role: 'user', text: 'hi' }]
   w.answers = ['greeting']
   await start($)
-  await turns($, clock, 2)
+  await turns($, clock, 1)
   expect(w.asks).toBe(0)
-  expect(w.renames).toEqual([])
+  await turns($, clock, 1, 1)
+  expect(w.asks).toBe(1)
 })
 
-test('topic: SAME keeps it; the model is asked again after 10 minutes and 3 turns', { options: TOPIC }, async ($, on) => {
+test('topic: SAME keeps it; the model is asked at most every 10 minutes', { options: TOPIC }, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on, { name: 'Builder' })
   w.messages = [{ role: 'user', text: 'fix the billing bug' }]
   w.answers = ['billing', 'SAME', 'SAME']
   await start($)
   await turns($, clock, 3)
-  expect(w.renames).toEqual(['Builder [billing]'])
-  await clock.advance(11 * MIN)
-  await turns($, clock, 2, 10) // 10 minutes, but 2 turns since the check: no check
   expect(w.asks).toBe(1)
+  expect(w.renames).toEqual(['Builder [billing]'])
+  await clock.advance(5 * MIN)
+  await turns($, clock, 3, 10) // within 10 minutes: no check
+  expect(w.asks).toBe(1)
+  await clock.advance(5 * MIN)
   await turns($, clock, 1, 20)
   expect(w.asks).toBe(2)
   expect(w.prompts[1]).toContain('Current label: billing')
-  await turns($, clock, 3, 30) // 3 turns, but within 10 minutes: no check
-  expect(w.asks).toBe(2)
   expect(w.renames.filter(r => !r.endsWith('[billing]'))).toEqual([])
+})
+
+test('topic: a restart keeps the 10-minute cap on model calls', { options: TOPIC }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  w.messages = [{ role: 'user', text: 'fix the billing bug' }, { role: 'user', text: 'and the invoices' }]
+  w.answers = ['billing', 'invoices']
+  await start($)
+  await clock.advance(MIN)
+  expect(w.asks).toBe(1) // checked at the start, from the conversation as it stands
+  await start($) // the restart
+  await turns($, clock, 2)
+  expect(w.asks).toBe(1)
 })
 
 test('topic: a new answer after 10 minutes renames, asleep or awake', { options: TOPIC }, async ($, on) => {
@@ -889,7 +908,7 @@ test('topic: a model that only gives the name back counts as a miss', { options:
   expect(w.renames).toEqual([])
 })
 
-test('topic: renamed from the app (no /rename), the next 💤 sees it; with no hold the topic comes back', { options: { topic: 'on', topic_freeze_hours: 0 } }, async ($, on) => {
+test('topic: renamed from the app (no /rename), the next 💤 sees it; the topic comes back on the new name', { options: TOPIC }, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on, { name: 'Builder' })
   workspace(w)
@@ -917,7 +936,7 @@ test('topic: a search of the whole session folder says nothing', { options: TOPI
   w.git.add('/work/demo/.git')
   w.messages = [{ role: 'user', text: 'hi' }]
   await start($)
-  for (let i = 0; i < 6; i++) await $.tool.call({ tool: 'Grep', pattern: 'x', path: '/work/demo' })
+  for (let i = 0; i < 6; i++) await edit($, '/work/demo', 'Grep')
   await turns($, clock, 3)
   expect(w.renames).toEqual([])
   expect(w.asks).toBe(1) // no project, so the model was asked (and had no answer)
@@ -967,30 +986,39 @@ test('topic: this session\'s own record is never pruned, and its age starts over
   expect((w.store.get(`mark:${ID}`) as any)?.at).toBe(100 * 24 * HOUR)
 })
 
-test('topic: the person renames it, so topics wait 4 hours', { options: TOPIC }, async ($, on) => {
+test('topic: the person renames it, and the topic goes on their new name', { options: TOPIC }, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on, { name: 'Builder' })
   workspace(w)
   await start($)
   await edit($, '/work/demo/alpha/a.ts')
   await edit($, '/work/demo/alpha/b.ts')
-  await turns($, clock, 3)
+  await turns($, clock, 1)
   expect(w.renames).toEqual(['Builder [alpha]'])
-  w.title('Shipping') // the person's /rename
-  await clock.advance(11 * MIN) // the sleep notices the rename, and marks the new name
-  expect(w.renames).toEqual(['Builder [alpha]', '💤 Shipping'])
-  expect(w.store.has(`freeze:${ID}`)).toBe(true)
-  await edit($, '/work/demo/alpha/c.ts')
-  await edit($, '/work/demo/alpha/d.ts')
-  await clock.advance(30 * MIN)
-  await turns($, clock, 3, 10)
-  expect(w.renames.filter(r => r.includes('['))).toEqual(['Builder [alpha]']) // held: no topic on the new name
-  expect(w.renames.at(-1)).toBe('Shipping')
-  await clock.advance(4 * HOUR)
-  await edit($, '/work/demo/alpha/e.ts')
-  await edit($, '/work/demo/alpha/f.ts')
-  await turns($, clock, 1, 20)
-  expect(w.renames.at(-1)).toBe('Shipping [alpha]')
+  await personRename($, 'Shipping')
+  await turns($, clock, 1, 10)
+  expect(w.renames).toEqual(['Builder [alpha]', 'Shipping', 'Shipping [alpha]'])
+})
+
+test('topic: /topic off takes it off for this session, /topic on brings it back', { options: TOPIC }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  workspace(w)
+  await start($)
+  await edit($, '/work/demo/alpha/a.ts')
+  await edit($, '/work/demo/alpha/b.ts')
+  await turns($, clock, 1)
+  expect(w.renames).toEqual(['Builder [alpha]'])
+  await $.command.run({ command: 'topic', args: 'off', origin: { kind: 'composer' } })
+  await settle()
+  expect(w.renames.at(-1)).toBe('Builder')
+  await turns($, clock, 2, 10)
+  expect(w.renames.at(-1)).toBe('Builder')
+  await clock.advance(11 * MIN)
+  expect(w.renames.at(-1)).toBe('💤 Builder') // the mark still works
+  await $.command.run({ command: 'topic', args: 'on', origin: { kind: 'composer' } })
+  await clock.advance(MIN)
+  expect(w.renames.at(-1)).toBe('💤 Builder [alpha]')
 })
 
 test('topic: a session restarted with a topic keeps it', { options: TOPIC }, async ($, on) => {
@@ -1099,19 +1127,7 @@ test('topic: the paths are checked every turn, from the first, with no model cal
   expect(w.asks).toBe(0)
 })
 
-test('topic: the path weight halves every 10 minutes', async () => {
-  const m = { turns: 0, lastCheck: 0, weights: { a: 8, b: 1 }, total: 9, decayedAt: 0, misses: 0 }
-  const started = decay(m, 1000)
-  expect(started.decayedAt).toBe(1000)
-  expect(decay(started, 1000 + 9 * MIN)).toBe(started)
-  const once = decay(started, 1000 + 15 * MIN)
-  expect(once.weights).toEqual({ a: 4, b: 0.5 })
-  expect(once.decayedAt).toBe(1000 + 10 * MIN)
-  expect(decay(started, 1000 + 30 * MIN).weights).toEqual({ a: 1 })
-  expect(decay(started, 1000 + 24 * HOUR).total).toBe(0)
-})
-
-test('topic: the person renames during the model call: no topic on their name, it is held', { options: TOPIC }, async ($, on) => {
+test('topic: the person renames during the model call: the topic lands on their new name', { options: TOPIC }, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on, { name: 'Builder' })
   w.messages = [{ role: 'user', text: 'fix the billing bug' }]
@@ -1119,14 +1135,13 @@ test('topic: the person renames during the model call: no topic on their name, i
   let open = () => {}
   w.modelGate = new Promise<void>(r => { open = r })
   await start($)
-  for (let i = 0; i < 3; i++) await turn($, `t${i}`) // the third asks the model, which takes a while
+  await turn($, 't0') // two prompts: the model is asked, and takes a while
   await personRename($, 'Shipping')
   w.modelGate = undefined
   open()
   await clock.advance(MIN)
   expect(w.asks).toBe(1)
-  expect(w.renames).toEqual(['Shipping'])
-  expect(w.store.has(`freeze:${ID}`)).toBe(true)
+  expect(w.renames).toEqual(['Shipping', 'Shipping [billing]'])
 })
 
 test('topic: a model call the engine refuses counts as a miss', { options: TOPIC }, async ($, on) => {

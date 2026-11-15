@@ -1,6 +1,6 @@
 {
   "name": "nametag",
-  "version": "0.12.1",
+  "version": "0.13.0",
   "description": "Tags each session's name with what it is doing: an idle mark (💤, 💤💤, 💤💤💤) cleared at the next turn, and optionally a short topic of the current work at the end",
   "author": {
     "name": "0x2alx"
@@ -119,14 +119,6 @@
         "{}",
         "<>"
       ]
-    },
-    "topic_freeze_hours": {
-      "type": "number",
-      "title": "Topic: hours held after a rename",
-      "description": "After you rename the session, hours before a topic is added again; 0 for none",
-      "default": 4,
-      "min": 0,
-      "max": 168
     },
     "topic_model": {
       "type": "string",

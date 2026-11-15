@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Mark, TopicMemory } from '../types'
+import type { Mark } from '../types'
 
 // nametag: tags a session's name with what it is doing. Two tags, each its own option.
 //
@@ -15,10 +15,11 @@ import type { Mark, TopicMemory } from '../types'
 //
 // Topic (option, off by default): a short label for what the session is working on, kept at the
 // very end of the name ("Builder [billing-api]", asleep "💤 Builder [billing-api]"), awake or not.
-// It comes from the paths the session's tools touch (a project folder that clearly leads) or, when
-// they don't say, from one small-model call on the last few messages. The paths are checked at the
-// end of every turn (that costs nothing), the model at most every 10 minutes; renamed only when it
-// changes, and held back for a while after the person renames the session.
+// It comes from the paths of the session's last tool calls, read from the conversation each time (a
+// project folder that clearly leads), or, when they don't say, from one small-model call on the
+// last few messages. Checked when the session starts and at the end of every turn; the model at
+// most every 10 minutes. Renamed only when it changes. A name the person gives the session gets the
+// topic too; `/topic off` turns topics off for this session, `/topic on` back on.
 //
 // The name is always built from the name the person gave the session, never parsed out of a name.
 // The transcript doesn't say who set a name, so the mod keeps a record per session in its store:
@@ -48,8 +49,9 @@ const WORK_MAX_MS = 24 * 60 * 60 * 1000 // a background task whose end was never
 const AGENT_BUSY = new Set(['pending', 'running'])
 
 const MIN_MS = 60 * 1000
-const TOPIC_MIN_TURNS = 3 // turns since the last model check before another
-const TOPIC_RATE_MS = 10 * MIN_MS // at most one model check this often; the path weight halves this often too
+const TOPIC_RATE_MS = 10 * MIN_MS // at most one model check this often
+const PATH_WINDOW = 30 // the session's last this many path tool calls decide the project
+const TOPIC_MIN_PROMPTS = 2 // the model is asked only once the person has written this many prompts
 const TOPIC_MAX_WAIT_MS = 120 * MIN_MS // checks that find nothing double the wait, up to this
 const TOPIC_SHARE = 0.6 // a project leads when it has this share of the path weight...
 const TOPIC_MIN_WEIGHT = 5 // ...and at least this much of it
@@ -66,8 +68,6 @@ const PATH_TOOLS: Record<string, { field: string; weight: number; dir?: true }> 
 }
 
 const transcript = atom({ plugin: 'nametag', key: 'transcript' } as const, null)
-// The topic's bookkeeping between checks.
-const topicMem = atom({ plugin: 'nametag', key: 'topic' } as const, null as TopicMemory | null)
 // Background commands and workflows still running: task id -> when it started.
 const work = atom({ plugin: 'nametag', key: 'work' } as const, null as Record<string, number> | null)
 // A turn of the main conversation is running. In the session's state so a hot reload mid-turn keeps it.
@@ -105,7 +105,7 @@ export function levels(options: Record<string, unknown>): Level[] {
 // " <separator> ", the emojis optionally in brackets.
 export type Style = {
   levels: Level[]; atEnd: boolean; sep: string; open: string; close: string
-  topic: boolean; topicSep: string; topicOpen: string; topicClose: string; freezeMs: number; topicModel: string
+  topic: boolean; topicSep: string; topicOpen: string; topicClose: string; topicModel: string
 }
 
 const BRACKETS: Record<string, [string, string]> = { '[]': ['[', ']'], '()': ['(', ')'], '{}': ['{', '}'], '<>': ['<', '>'] }
@@ -113,7 +113,6 @@ const BRACKETS: Record<string, [string, string]> = { '[]': ['[', ']'], '()': ['(
 export function style(options: Record<string, unknown>): Style {
   const sep = typeof options.separator === 'string' ? options.separator.trim() : ''
   const pair = typeof options.brackets === 'string' ? BRACKETS[options.brackets.replace(/\s/g, '')] : undefined
-  const hours = typeof options.topic_freeze_hours === 'number' && options.topic_freeze_hours >= 0 ? options.topic_freeze_hours : 4
   const tb = typeof options.topic_brackets === 'string' ? options.topic_brackets : '[]'
   const topicPair = BRACKETS[tb.replace(/\s/g, '')]
   const model = typeof options.topic_model === 'string' && options.topic_model.trim() !== '' ? options.topic_model.trim() : 'haiku'
@@ -122,7 +121,6 @@ export function style(options: Record<string, unknown>): Style {
     topic: options.topic === 'on',
     topicSep: typeof options.topic_separator === 'string' ? options.topic_separator.trim() : '',
     topicOpen: topicPair?.[0] ?? '', topicClose: topicPair?.[1] ?? '',
-    freezeMs: hours * 60 * MIN_MS,
     topicModel: model,
   }
 }
@@ -289,12 +287,11 @@ async function prune($: Engine): Promise<void> {
     } else if (key.startsWith('mark:')) {
       const v = asMark(await $.store.get(key))
       if (!v || v.at < cutoff) await $.store.delete(key)
-    } else if (key.startsWith('seen:')) {
-      const at = await $.store.get(key)
-      if (key !== `seen:${await $.session.id()}` && (typeof at !== 'number' || at < cutoff)) await $.store.delete(key)
-    } else if (key.startsWith('freeze:')) {
-      const until = await $.store.get(key)
-      if (typeof until !== 'number' || until <= now) await $.store.delete(key)
+    } else if (key.startsWith('seen:') || key.startsWith('asked:') || key.startsWith('notopic:')) {
+      const v = await $.store.get(key)
+      const at = typeof v === 'number' ? v : (v as { at?: unknown } | undefined)?.at
+      const mine = key.endsWith(`:${await $.session.id()}`)
+      if (!mine && (typeof at !== 'number' || at < cutoff)) await $.store.delete(key)
     }
   }
 }
@@ -304,23 +301,13 @@ function seenKey(id: string): string {
   return `seen:${id}`
 }
 
-// After the person renames the session, topics wait for `topic_freeze_hours`.
-function freezeKey(id: string): string {
-  return `freeze:${id}`
+// `/topic off`: no topic for this session (a time, so it is pruned like the rest); `/topic on` clears it.
+function offKey(id: string): string {
+  return `notopic:${id}`
 }
 
-async function freeze($: Engine, st: Style): Promise<void> {
-  if (!st.topic || st.freezeMs <= 0) return
-  await $.store.set(freezeKey(await $.session.id()), (await $.clock.now()) + st.freezeMs)
-}
-
-async function frozen($: Engine): Promise<boolean> {
-  const key = freezeKey(await $.session.id())
-  const until = await $.store.get(key)
-  if (until === undefined) return false
-  if (typeof until === 'number' && until > (await $.clock.now())) return true
-  await $.store.delete(key)
-  return false
+async function topicOff($: Engine, id: string): Promise<boolean> {
+  return (await $.store.get(offKey(id))) !== undefined
 }
 
 // ---- sleeping and waking ---------------------------------------------------------------------
@@ -328,7 +315,7 @@ async function frozen($: Engine): Promise<boolean> {
 // Sets the name to the person's name with the mark of `want.level` levels and the topic
 // `want.topic` (each left as it is when not given). Returns 'retry' when it should be tried again
 // later (the name couldn't be read, or the rename failed), and 'renamed' when the person renamed
-// the session since the mod last did: their name stands, and topics wait for a while.
+// the session since the mod last did: their name stands, and is built on from the next check.
 type Want = { level?: number; topic?: string | null }
 
 async function render($: Engine, st: Style, want: Want): Promise<'done' | 'retry' | 'renamed'> {
@@ -340,13 +327,12 @@ async function render($: Engine, st: Style, want: Want): Promise<'done' | 'retry
   const mine = await record($, id)
   if (mine && mine.set !== name) {
     await dropRecord($, id)
-    await freeze($, st)
     return 'renamed'
   }
   const base = mine ? mine.base : name
   const level = want.level ?? mine?.level ?? 0
   let topic = want.topic !== undefined ? want.topic : (mine?.topic ?? null)
-  if (!st.topic || (topic && inName(base, topic))) topic = null
+  if (!st.topic || (topic && inName(base, topic)) || (topic && (await topicOff($, id)))) topic = null
   const target = build(base, st, level, topic)
   if (target !== name && !(await rename($, target))) return 'retry'
   if (personRenames !== seen) {
@@ -354,7 +340,6 @@ async function render($: Engine, st: Style, want: Want): Promise<'done' | 'retry
     // run after it, may have replaced their name: theirs stands.
     if (personName && (await currentName($)) !== personName) await rename($, personName)
     await dropRecord($, id)
-    await freeze($, st)
     return 'renamed'
   }
   if (target === base) await dropRecord($, id)
@@ -459,16 +444,17 @@ async function active($: Engine): Promise<void> {
 
 // ---- the topic ------------------------------------------------------------------------------
 
-function fresh(): TopicMemory {
-  return { turns: 0, lastCheck: 0, weights: {}, total: 0, decayedAt: 0, misses: 0 }
+// The model checks: when the last was, and how many in a row found nothing (each doubles the wait).
+// In the store, so a restart keeps the cap.
+type Asked = { at: number; misses: number }
+
+async function asked($: Engine, id: string): Promise<Asked> {
+  const v = (await $.store.get(`asked:${id}`)) as Partial<Asked> | undefined
+  return { at: typeof v?.at === 'number' ? v.at : 0, misses: typeof v?.misses === 'number' ? v.misses : 0 }
 }
 
-async function mem($: Engine): Promise<TopicMemory> {
-  return (await read($, topicMem)) ?? fresh()
-}
-
-async function setMem($: Engine, f: (m: TopicMemory) => TopicMemory): Promise<void> {
-  await update($, topicMem, m => f(m ?? fresh()))
+async function setAsked($: Engine, id: string, a: Asked): Promise<void> {
+  await $.store.set(`asked:${id}`, a)
 }
 
 // Runs `fn` after any rename in flight, as one: ticks skip and wake waits while it runs.
@@ -549,14 +535,27 @@ async function projectOf($: Engine, path: string, isDir: boolean): Promise<strin
   return null
 }
 
-async function notePath($: Engine, path: string, weight: number, isDir: boolean): Promise<void> {
-  const project = await projectOf($, path, isDir)
-  const now = await $.clock.now()
-  await setMem($, m => ({
-    ...(m = decay(m, now)), // the old weight halves before the new is added
-    total: m.total + weight,
-    weights: project ? { ...m.weights, [project]: (m.weights[project] ?? 0) + weight } : m.weights,
-  }))
+// The project the session's last PATH_WINDOW path tool calls point at, read from the conversation
+// as it is now (a restart or reload loses nothing), or null.
+async function pathLeader($: Engine): Promise<string | null> {
+  const msgs = await $.session.messages()
+  const weights: Record<string, number> = {}
+  let total = 0
+  let seen = 0
+  for (let i = msgs.length - 1; i >= 0 && seen < PATH_WINDOW; i--) {
+    const uses = msgs[i]!.toolUses ?? []
+    for (let j = uses.length - 1; j >= 0 && seen < PATH_WINDOW; j--) {
+      const u = uses[j]!
+      const t = PATH_TOOLS[u.tool]
+      const path = t ? u.input?.[t.field] : undefined
+      if (!t || typeof path !== 'string') continue
+      seen++
+      total += t.weight
+      const project = await projectOf($, path, t.dir === true)
+      if (project) weights[project] = (weights[project] ?? 0) + t.weight
+    }
+  }
+  return leader(weights, total)
 }
 
 // The project that clearly leads the path weight, or null.
@@ -603,9 +602,7 @@ export function cleanTopic(text: string, current: string | null, keep: 'first' |
 
 const TOPIC_SYSTEM = 'You label work sessions. Reply with the label only.'
 
-async function askModel($: Engine, st: Style, current: string | null): Promise<string | null> {
-  const lines = recentLines(await $.session.messages())
-  if (!lines.length) return null
+async function askModel($: Engine, st: Style, current: string | null, lines: string[]): Promise<string | null> {
   const prompt = [
     `Current label: ${current ?? 'none'}`,
     '',
@@ -629,20 +626,9 @@ async function askModel($: Engine, st: Style, current: string | null): Promise<s
   return cleanTopic(r.text, current)
 }
 
-// The path weight halves every TOPIC_RATE_MS, so the paths of the last half hour or so decide.
-export function decay(m: TopicMemory, now: number): TopicMemory {
-  if (!m.decayedAt) return { ...m, decayedAt: now } // 0: not started yet
-  const k = Math.floor((now - m.decayedAt) / TOPIC_RATE_MS)
-  if (k <= 0) return m
-  const f = k >= 20 ? 0 : 0.5 ** k
-  const weights: Record<string, number> = {}
-  for (const [p, v] of Object.entries(m.weights)) if (v * f >= 0.5) weights[p] = v * f
-  return { ...m, weights, total: m.total * f, decayedAt: m.decayedAt + k * TOPIC_RATE_MS }
-}
-
 // The person's name under the mod's, and the topic now on it, read in step with the renames. A
-// name the mod didn't set is the person's (renamed from the app, say), which stands alone while
-// topics wait. Null: unnamed, unreadable, or just renamed by the person.
+// name the mod didn't set is the person's (renamed from the app, say): the base from now on. Null:
+// unnamed or unreadable.
 async function named($: Engine, st: Style, id: string): Promise<{ base: string; current: string | null } | null> {
   let out: { base: string; current: string | null } | null = null
   await serial($, async () => {
@@ -651,8 +637,8 @@ async function named($: Engine, st: Style, id: string): Promise<{ base: string; 
     const mine = await record($, id)
     if (mine && mine.set !== name) {
       await dropRecord($, id)
-      await freeze($, st)
       reached = 0 // the next tick marks the new name as the idle time calls for
+      out = { base: name, current: null }
       return
     }
     out = { base: mine ? mine.base : name, current: mine?.topic ?? null }
@@ -660,52 +646,47 @@ async function named($: Engine, st: Style, id: string): Promise<{ base: string; 
   return out
 }
 
-// Puts `topic` on the name, unless the person renamed the session since `seen` (a model call can
-// take a while) or topics are held. Turn's end: the session is awake, so no mark.
-function setTopic($: Engine, st: Style, topic: string, seen: number): Promise<void> {
+// Puts `topic` on the name as it is then (a name the person gave meanwhile included). Turn's end or
+// a start: the mark is whatever is on the name now.
+function setTopic($: Engine, st: Style, topic: string): Promise<void> {
   return serial($, async () => {
-    if (personRenames !== seen || (await frozen($))) return
-    await render($, st, { topic, level: 0 })
+    await render($, st, { topic })
   })
 }
 
-// At the end of each turn of the main conversation, cheapest test first. The paths first: when one
-// project leads them, it is the topic, with no model call. Otherwise the model, after 3 turns and
-// 10 minutes since its last check; a check that found nothing (the model failed, or only gave the
-// name back) doubles the wait, up to 2 hours.
+// When the session starts and at the end of each turn of the main conversation, cheapest test
+// first, from the conversation as it is now. The paths first: when one project leads them, it is the
+// topic, with no model call. Otherwise the model, once the person has written a couple of prompts and
+// 10 minutes have passed since its last check; a check that found nothing (the model failed, or only
+// gave the name back) doubles the wait, up to 2 hours.
 async function topicTurn($: Engine, st: Style): Promise<void> {
   if (!st.topic || !interactive) return
-  const seen = personRenames
-  const now = await $.clock.now()
-  await setMem($, m => ({ ...decay(m, now), turns: m.turns + 1 }))
-  if (await frozen($)) return
-  const m = await mem($)
   const id = await $.session.id()
-  const project = leader(m.weights, m.total)
+  if (await topicOff($, id)) return
+  const project = await pathLeader($)
 
   if (project !== null) {
     if (((await record($, id))?.topic ?? null) === project) return // the record alone: no name read
     const n = await named($, st, id)
     if (!n || n.current === project || inName(n.base, project)) return
-    await setMem($, x => ({ ...x, misses: 0 }))
-    await setTopic($, st, project, seen)
+    await setTopic($, st, project)
     return
   }
 
-  if (m.turns < TOPIC_MIN_TURNS) return
-  const since = m.lastCheck === 0 ? Infinity : now - m.lastCheck // 0: never checked
-  if (since < Math.min(TOPIC_RATE_MS * 2 ** m.misses, TOPIC_MAX_WAIT_MS)) return
-  await setMem($, x => ({ ...x, turns: 0, lastCheck: now }))
+  const now = await $.clock.now()
+  const a = await asked($, id)
+  const since = a.at === 0 || a.at > now ? Infinity : now - a.at
+  if (since < Math.min(TOPIC_RATE_MS * 2 ** a.misses, TOPIC_MAX_WAIT_MS)) return
+  const lines = recentLines(await $.session.messages())
+  if (lines.filter(l => l.startsWith('User: ')).length < TOPIC_MIN_PROMPTS) return // too little to go on
   const n = await named($, st, id)
   if (!n) return // no model call
-  let topic = await askModel($, st, n.current)
+  await setAsked($, id, { at: now, misses: a.misses })
+  let topic = await askModel($, st, n.current, lines)
   if (topic && inName(n.base, topic)) topic = null
-  if (!topic) {
-    await setMem($, x => ({ ...x, misses: x.misses + 1 }))
-    return
-  }
-  await setMem($, x => ({ ...x, misses: 0 }))
-  if (topic !== n.current) await setTopic($, st, topic, seen)
+  if (!topic) return setAsked($, id, { at: now, misses: a.misses + 1 })
+  await setAsked($, id, { at: now, misses: 0 })
+  if (topic !== n.current) await setTopic($, st, topic)
 }
 
 // ---- hooks ---------------------------------------------------------------------------------
@@ -739,6 +720,11 @@ export const register: Register = (on, options) => {
       if (n === 0) return unmark($, st)
       if ((await render($, st, { level: n })) === 'done' && lastActivity === since) reached = n
     })
+    // the topic from the conversation as it stands, right away
+    if (st.topic) {
+      await $.command.register({ name: 'topic', description: 'nametag: turn the topic at the end of this session\'s name off or on', argumentHint: 'off | on' }).catch(err => $.ui.log(`nametag: ${err}`, { to: 'debug' }))
+      topicTurn($, st).catch(err => $.ui.log(`nametag: ${err}`, { to: 'debug' }))
+    }
     if (st.levels.length) {
       timer = $.clock.every(CHECK_MS, () => {
         tick($, st).catch(err => $.ui.log(`nametag: ${err}`, { to: 'debug' }))
@@ -755,9 +741,27 @@ export const register: Register = (on, options) => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
-  // The person renames the session: their name stands alone, and topics wait for a while. The
-  // record goes once the name is no longer the mod's (the rename went through). Not awaited: it
-  // waits for any rename of the mod's in flight, which may wait for this command.
+  // `/topic off` / `/topic on`, for this session. Not awaited: the rename waits for the session to be idle.
+  on('command.run', { command: 'topic' }, async ($, e) => {
+    const id = await $.session.id()
+    const arg = e.args.trim().toLowerCase()
+    if (arg === 'off') {
+      await $.store.set(offKey(id), await $.clock.now())
+      void serial($, () => render($, st, { topic: null }))
+      return { text: 'nametag: no topic for this session (/topic on to bring it back)' }
+    }
+    if (arg === 'on') {
+      await $.store.delete(offKey(id))
+      await setAsked($, id, { at: 0, misses: 0 })
+      topicTurn($, st).catch(err => $.ui.log(`nametag: ${err}`, { to: 'debug' }))
+      return { text: 'nametag: topic on for this session' }
+    }
+    return { text: `nametag: topic is ${(await topicOff($, id)) ? 'off' : 'on'} for this session; /topic off or /topic on` }
+  })
+
+  // The person renames the session: their name stands, and the mark and topic are built on it from
+  // the next check. The record goes once the name is no longer the mod's (the rename went through).
+  // Not awaited: it waits for any rename of the mod's in flight, which may wait for this command.
   on('command.run', async ($, e, next) => {
     if (e.command !== 'rename' || e.origin?.kind === 'plugin') return next(e)
     personRenames++
@@ -769,18 +773,14 @@ export const register: Register = (on, options) => {
       const mine = await record($, id)
       const name = await currentName($)
       if (mine && name !== undefined && name !== mine.set) await dropRecord($, id)
-      await freeze($, st)
     })
     return r
   }).catch(($, e, next) => next(e))
 
-  // Work put in the background, and the paths the work touches, in any agent's loop.
+  // Work put in the background, in any agent's loop.
   on('tool.call', async ($, e, next) => {
     const r = await next(e)
     try {
-      const pathTool = st.topic ? PATH_TOOLS[e.tool] : undefined
-      const path = pathTool ? (e as Record<string, unknown>)[pathTool.field] : undefined
-      if (pathTool && typeof path === 'string') await notePath($, path, pathTool.weight, pathTool.dir === true)
       if (!('deny' in r && r.deny !== undefined) && !r.isError) {
         const id = startedTask(e.tool, r.result)
         if (id) await track($, id)
