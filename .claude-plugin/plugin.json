@@ -1,7 +1,7 @@
 {
   "name": "nametag",
-  "version": "0.7.1",
-  "description": "Marks an idle session's name in up to three steps (💤, 💤💤, 💤💤💤) and clears the mark at the next turn",
+  "version": "0.8.0",
+  "description": "Marks an idle session's name in up to three steps (💤, 💤💤, 💤💤💤) and clears the mark at the next turn; optionally ends the name with a short topic of the current work",
   "author": {
     "name": "0x2alx"
   },
@@ -12,7 +12,8 @@
     "mod",
     "session",
     "idle",
-    "rename"
+    "rename",
+    "topic"
   ],
   "types": "./types/index.d.ts",
   "userConfig": {
@@ -86,6 +87,36 @@
         "{}",
         "<>"
       ]
+    },
+    "topic": {
+      "type": "string",
+      "title": "Topic",
+      "description": "End the session's name with a short label for what it is working on (on), or not (off). When the paths the session touches don't say, it asks a small model, which uses tokens",
+      "default": "off",
+      "options": [
+        "off",
+        "on"
+      ]
+    },
+    "topic_separator": {
+      "type": "string",
+      "title": "Topic separator",
+      "description": "Text between the name and the topic, with a space on each side; empty for just a space",
+      "default": "·"
+    },
+    "topic_freeze_hours": {
+      "type": "number",
+      "title": "Topic: hours held after a rename",
+      "description": "After you rename the session, hours before a topic is added again; 0 for none",
+      "default": 4,
+      "min": 0,
+      "max": 168
+    },
+    "topic_model": {
+      "type": "string",
+      "title": "Topic model",
+      "description": "The model asked for a topic when the paths don't say (an alias such as haiku, or a model id)",
+      "default": "haiku"
     }
   }
 }
