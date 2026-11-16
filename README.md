@@ -12,19 +12,23 @@ Builder  →  10 min  →  💤 Builder  →  3 h  →  💤💤 Builder  →  1
 
 ## Install
 
-At the prompt of a Claude Code session in a terminal:
+The repository is its own plugin marketplace, `cc-mod-nametag`. At the prompt of a Claude Code session in a terminal:
 
 ```
-/plugin install nametag --marketplace 0x2alx/cc-mod-nametag
+/plugin marketplace add 0x2alx/cc-mod-nametag
+/plugin install nametag@cc-mod-nametag
 ```
 
-From a shell:
+`/plugin install` opens the plugin's page, where you pick the scope (just you, this project, or this project on this machine only). From a shell, this installs it for your user:
 
 ```
-claude plugin install nametag --marketplace 0x2alx/cc-mod-nametag
+claude plugin marketplace add 0x2alx/cc-mod-nametag
+claude plugin install nametag@cc-mod-nametag
 ```
 
-In the desktop app, where `/plugin` doesn't run, click **+** next to the prompt box, then **Plugins**. Choose **Add marketplace** with `0x2alx/cc-mod-nametag`, then **Add plugin**.
+On Claude Code 2.1.292 or later, one line does both: `claude plugin install nametag --marketplace 0x2alx/cc-mod-nametag` (in a session, `/plugin install nametag --marketplace 0x2alx/cc-mod-nametag`, from 2.1.275).
+
+The desktop app's Code tab shares its settings with the terminal: a plugin installed for your user from a terminal is installed there too. The options all have defaults; change them with `/plugin configure nametag@cc-mod-nametag` (see [Options](#options)).
 
 To try it from a local copy without installing, run `claude --plugin-dir /path/to/cc-mod-nametag`. Loaded that way, it reads its options under `nametag@inline` rather than the id below.
 
