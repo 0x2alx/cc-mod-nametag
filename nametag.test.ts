@@ -601,6 +601,20 @@ test('renames and bookkeeping rows are not activity; a prompt row is', async () 
   expect(lastActivityIn('{"type":"custom-title","customTitle":"x"}')).toBe(null)
 })
 
+test('leaving is not activity: a typed /exit or /quit and what it prints', async () => {
+  const at = (ms: number, type: string, extra = {}) => JSON.stringify({ type, timestamp: new Date(ms).toISOString(), ...extra })
+  const user = (ms: number, content: unknown, extra = {}) => at(ms, 'user', { message: { role: 'user', content }, ...extra })
+  const caveat = user(5000, '<local-command-caveat>Caveat: ...</local-command-caveat>', { isMeta: true })
+  const exit = user(5001, '<command-name>/exit</command-name>\n            <command-message>exit</command-message>\n            <command-args></command-args>')
+  const bye = user(5002, '<local-command-stdout>See ya!</local-command-stdout>')
+  expect(lastActivityIn([at(2000, 'assistant'), caveat, exit, bye].join('\n'))).toBe(2000)
+  const quit = user(5001, [{ type: 'text', text: '<command-name>/quit</command-name>' }])
+  expect(lastActivityIn([at(2000, 'assistant'), quit].join('\n'))).toBe(2000)
+  // a prompt that only mentions it is activity
+  expect(lastActivityIn([at(2000, 'assistant'), user(6000, 'how do I /exit vim?')].join('\n'))).toBe(6000)
+  expect(lastActivityIn([at(2000, 'assistant'), user(6000, '<command-name>/exits</command-name>')].join('\n'))).toBe(6000)
+})
+
 test('a reload in the middle of a long turn does not mark it', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on, { name: 'Builder' })

@@ -280,6 +280,14 @@ async function currentName($: Engine): Promise<string | null | undefined> {
 // conversation itself (a prompt, a reply, a tool result, a background task's notice). Renames,
 // the meta rows Claude Code adds after them, notices and bookkeeping rows don't count. Null when
 // none is found.
+const LEAVING = /^\s*(<command-name>\/(exit|quit)<\/command-name>|<local-command-(stdout|stderr)>)/
+
+function textOf(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content.map(b => (b && typeof b === 'object' && (b as { type?: unknown }).type === 'text' ? String((b as { text?: unknown }).text ?? '') : '')).join('')
+}
+
 export function lastActivityIn(text: string): number | null {
   const lines = text.split('\n')
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -291,7 +299,9 @@ export function lastActivityIn(text: string): number | null {
       // from this mod (origin plugin) or the person; a turn that follows has rows of its own.
       // Nor a synthetic reply: a resume (--continue) writes "No response requested." as model <synthetic>.
       // Nor the summary a compaction writes: Claude Code compacts an idle session on its own.
+      // Nor leaving: a typed /exit or /quit, and the output of a local command ("See ya!").
       if (row?.isMeta === true || row?.origin?.kind === 'plugin' || row?.message?.model === '<synthetic>' || row?.isCompactSummary === true) continue
+      if (row?.type === 'user' && LEAVING.test(textOf(row.message?.content))) continue
       if ((row?.type === 'user' || row?.type === 'assistant') && typeof row.timestamp === 'string') {
         const t = Date.parse(row.timestamp)
         if (!Number.isNaN(t)) return t
@@ -986,8 +996,8 @@ export const register: Register = (on, options) => {
   // notice of its end names its task id.
   on('prompt.submit', async ($, e, next) => {
     await adopted($, st) // first, so this turn's own work is kept
-    // no rename is activity, should a typed /rename come this way too
-    if (e.origin?.kind !== 'plugin' && !/^\s*\/rename(\s|$)/.test(e.text)) await active($)
+    // no rename is activity, nor leaving, should a typed /rename, /exit or /quit come this way too
+    if (e.origin?.kind !== 'plugin' && !/^\s*\/(rename|exit|quit)(\s|$)/.test(e.text)) await active($)
     if (e.origin?.kind === 'task-notification') {
       const ids = [...e.text.matchAll(TASK_ID)].map(x => x[1]!.trim())
       for (const id of Object.keys((await read($, work)) ?? {})) if (mentions(e.text, id)) ids.push(id)
