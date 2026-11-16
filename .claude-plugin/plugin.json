@@ -1,7 +1,7 @@
 {
   "name": "nametag",
   "displayName": "nametag",
-  "version": "0.19.5",
+  "version": "0.19.6",
   "description": "Tags each session's name with what it is doing: an idle mark (💤, 💤💤, 💤💤💤) cleared at the next turn, and optionally a short topic of the current work at the end",
   "author": {
     "name": "0x2alx"
@@ -9,6 +9,9 @@
   "homepage": "https://github.com/0x2alx/cc-mod-nametag",
   "repository": "https://github.com/0x2alx/cc-mod-nametag",
   "license": "MIT",
+  "engines": {
+    "claude-code": ">=2.1.289"
+  },
   "icon": "./.claude-plugin/icon.png",
   "keywords": [
     "mod",

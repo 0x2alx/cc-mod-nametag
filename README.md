@@ -12,6 +12,8 @@ Builder  →  10 min  →  💤 Builder  →  3 h  →  💤💤 Builder  →  1
 
 ## Install
 
+Requires **Claude Code 2.1.289 or later** (mods arrived in 2.1.287; it also uses the agent states 2.1.289 added). Older versions refuse the plugin's manifest. Check with `claude --version`, update with `claude update`.
+
 The repository is its own plugin marketplace, `cc-mod-nametag`. At the prompt of a Claude Code session in a terminal:
 
 ```
@@ -184,7 +186,7 @@ Each rename goes through `/rename`, which adds a short "Session renamed to: …"
 - **Long background commands.** A command left running in the background, a dev server for example, keeps the session awake for as long as it runs, as the work it is. Stop it (or let it end) and the idle time starts.
 - **A reload in the middle of a turn.** A mod hears only the end of a turn it heard start, so after a reload (an update, `/reload-plugins`) that lands during a turn, the mod reads that turn's end from the transcript instead. If the transcript never shows it, the turn counts as over after an hour without activity (a question left unanswered that long then shows the mark until you answer).
 - **Options changed.** The mod keeps the mark and topic options it ran with (the last five sets, only the options) in its store. When you change them, a name built under older ones is still read exactly: the old mark comes off and the new one goes on, and an emoji of your own name stays. A mark from options older than any it kept is recognised by its emojis (💤 or the current ones) as before.
-- **Mod API.** It needs a Claude Code version with the mods API (hooks modules). It is tested on Claude Code 2.1.325, in the terminal. The desktop app and the IDE extensions run the same engine but are untested. Cloud sessions (Claude Code on the web) are untested too, and may count as headless, which the mod leaves alone.
+- **Mod API.** It needs Claude Code 2.1.289 or later (the mods API, hooks modules). It is tested on Claude Code 2.1.325, in the terminal. The desktop app and the IDE extensions run the same engine but are untested. Cloud sessions (Claude Code on the web) are untested too, and may count as headless, which the mod leaves alone.
 
 ## Troubleshooting
 
