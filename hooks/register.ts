@@ -347,6 +347,44 @@ async function transcriptActivity($: Engine): Promise<number | null> {
   return end ? lastActivityIn(end.text) : null
 }
 
+// Whether Remote Control is behind on the name. It shows the name the server last heard, and a
+// rename made while the bridge was down (the one at start comes before the bridge connects) never
+// reaches it: the newest /rename row is older than the newest "remote-control is active" row, and
+// came after the connect before that one, if any. A rename after the connect answers it.
+const RENAME_ROW = /^\s*<command-name>\/rename<\/command-name>/
+export function bridgeBehind(text: string): boolean {
+  const lines = text.split('\n')
+  let connects = 0
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const l = lines[i]!
+    if (!l.includes('"subtype":"bridge_status"') && !(l.includes('"subtype":"local_command"') && l.includes('/rename'))) continue
+    try {
+      const row = JSON.parse(l)
+      if (row?.type !== 'system' || row?.isSidechain === true) continue
+      if (row.subtype === 'bridge_status') {
+        if (++connects === 2) return false
+      } else if (row.subtype === 'local_command' && typeof row.content === 'string' && RENAME_ROW.test(row.content)) {
+        return connects === 1
+      }
+    } catch {}
+  }
+  return false
+}
+
+// Sends the name once more when Remote Control missed it. Reads the transcript only when it changed.
+let bridgeKey = ''
+async function resendForBridge($: Engine): Promise<boolean> {
+  const key = await transcriptKey($)
+  if (key === '' || key === bridgeKey) return false
+  bridgeKey = key
+  const end = await transcriptEnd($)
+  if (!end || !bridgeBehind(end.text)) return false
+  const name = await currentName($)
+  if (!name) return false
+  void serial($, () => rename($, name))
+  return true
+}
+
 // ---- the name, taken apart ---------------------------------------------------------------------
 
 function escape(s: string): string {
@@ -617,7 +655,8 @@ async function active($: Engine): Promise<void> {
   lastActivity = await $.clock.now()
 }
 
-// Once a minute, cheapest check first: a rename or a turn running, no level due by the activity
+// Once a minute, cheapest check first: a rename or a turn running, a name Remote Control missed
+// (read only when the transcript changed), no level due by the activity
 // this process saw (the clock); then the transcript's own last activity, work in the background,
 // and only then the name, read right then and set to the levels due (nothing to rename when it
 // already has them).
@@ -625,6 +664,7 @@ async function tick($: Engine, st: Style): Promise<void> {
   if (sleeping || (await inTurn($))) return
   await adopted($, st)
   if (wakePending) return void serial($, () => unmark($, st))
+  if (await resendForBridge($)) return
   const now = await $.clock.now()
   const cheap = due(st, now - lastActivity)
   if (cheap === 0) return
@@ -977,6 +1017,7 @@ export const register: Register = (on, options) => {
       await update($, origin, () => rows)
     }
     const n = (await inTurn($)) ? 0 : due(st, now - lastActivity)
+    bridgeKey = await transcriptKey($) // a Remote Control connect after this writes a row
     void serial($, () => (n === 0 ? unmark($, st) : render($, st, { level: n })))
     if (st.topic) {
       topicOff = await readTopicOff($).catch(() => false)

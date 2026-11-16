@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { cleanTopic, decompose, lastActivityIn, lastTopicCommand, leader, mentions, recentLines, runningTasks, style, turnEndedIn } from './hooks/register'
+import { bridgeBehind, cleanTopic, decompose, lastActivityIn, lastTopicCommand, leader, mentions, recentLines, runningTasks, style, turnEndedIn } from './hooks/register'
 
 const ID = 'aaaaaaaa-0000-4000-8000-000000000001'
 const CONFIG = '/u/.claude'
@@ -19,6 +19,7 @@ function world(on: any, opts: { name?: string; size?: number; env?: Record<strin
     git: new Set<string>(), files: new Map<string, string>(), dirs: {} as Record<string, string[]>, messages: [] as { role: string; text: string }[],
     answers: [] as string[], calls: [] as { effort?: string; maxTokens?: number }[], asks: 0, prompts: [] as string[], tails: 0,
     metaAt: 0, // when set, each rename also adds the meta row Claude Code writes after one, at this time
+    localAt: 0, // when set, each rename also adds the /rename rows Claude Code writes before its title, at this time
     title: (name: string) => { w.text += JSON.stringify({ type: 'custom-title', customTitle: name, sessionId: w.id }) + '\n' },
     // a prompt (or reply) in the transcript at `ms`
     row: (ms: number, type = 'user') => { w.text += JSON.stringify({ type, timestamp: new Date(ms).toISOString(), message: { content: 'x' } }) + '\n' },
@@ -92,7 +93,9 @@ function world(on: any, opts: { name?: string; size?: number; env?: Record<strin
       w.attempts++
       if (w.gate && e.origin?.kind !== 'composer') await w.gate // the person's own run at once
       if (w.failRenames > 0) { w.failRenames--; throw new Error('rename refused') }
-      w.renames.push(e.args); title(e.args)
+      w.renames.push(e.args)
+      if (w.localAt) w.text += JSON.stringify({ type: 'system', subtype: 'local_command', content: `<command-name>/rename</command-name>\n            <command-message>rename</command-message>\n            <command-args>${e.args}</command-args>`, timestamp: new Date(w.localAt).toISOString() }) + '\n'
+      title(e.args)
       if (w.metaAt) w.text += JSON.stringify({ type: 'user', isMeta: true, origin: { kind: 'plugin', name: 'nametag' }, message: { content: `The user named this session "${e.args}"` }, timestamp: new Date(w.metaAt).toISOString() }) + '\n'
     }
     return { text: `Session renamed to: ${e.args}` }
@@ -1629,4 +1632,50 @@ test('an idle session whose transcript has not changed is not read again until a
   expect(w.renames.at(-1)).toBe('💤 Other')
   await clock.advance(3 * HOUR)
   expect(w.renames.at(-1)).toBe('💤💤 Other')
+})
+
+const bridgeUp = (ms: number) => JSON.stringify({ type: 'system', subtype: 'bridge_status', content: '/remote-control is active', timestamp: new Date(ms).toISOString() })
+const renamed = (ms: number, name = 'x') => JSON.stringify({ type: 'system', subtype: 'local_command', content: `<command-name>/rename</command-name>\n            <command-args>${name}</command-args>`, timestamp: new Date(ms).toISOString() })
+
+test('bridgeBehind: a rename made before Remote Control connected', () => {
+  expect(bridgeBehind([renamed(1), bridgeUp(2)].join('\n'))).toBe(true) // the start: rename, then the bridge
+  expect(bridgeBehind([bridgeUp(1), renamed(2)].join('\n'))).toBe(false) // renamed while connected
+  expect(bridgeBehind([renamed(1), bridgeUp(2), renamed(3)].join('\n'))).toBe(false) // sent again
+  expect(bridgeBehind([bridgeUp(1), renamed(2), bridgeUp(3), renamed(4), bridgeUp(5)].join('\n'))).toBe(true)
+  expect(bridgeBehind([renamed(1), bridgeUp(2), bridgeUp(3)].join('\n'))).toBe(false) // nothing between the connects
+  expect(bridgeBehind(bridgeUp(1))).toBe(false) // no rename at all
+  expect(bridgeBehind(renamed(1))).toBe(false) // no Remote Control
+  // a /topic or other local command is not a rename, nor a subagent's row
+  const topic = JSON.stringify({ type: 'system', subtype: 'local_command', content: '<command-name>/topic</command-name> /rename', timestamp: new Date(1).toISOString() })
+  expect(bridgeBehind([topic, bridgeUp(2)].join('\n'))).toBe(false)
+  const side = JSON.stringify({ type: 'system', subtype: 'bridge_status', isSidechain: true, content: 'x' })
+  expect(bridgeBehind([renamed(1), side].join('\n'))).toBe(false)
+})
+
+test('Remote Control that connects after the start rename gets the name once more', async ($, on) => {
+  const clock = mock.clock(on, { now: 100 * HOUR })
+  const w = world(on, { name: '💤 Builder' })
+  w.localAt = 100 * HOUR
+  w.row(100 * HOUR - 5 * MIN)
+  await start($)
+  expect(w.renames).toEqual(['Builder'])
+  w.text += bridgeUp(100 * HOUR + 1000) + '\n'
+  await clock.advance(1 * MIN)
+  expect(w.renames).toEqual(['Builder', 'Builder'])
+  await clock.advance(3 * MIN)
+  expect(w.renames).toEqual(['Builder', 'Builder'])
+  // then the levels as usual
+  await clock.advance(3 * MIN)
+  expect(w.renames).toEqual(['Builder', 'Builder', '💤 Builder'])
+})
+
+test('no Remote Control, or a rename after it connected: nothing sent again', async ($, on) => {
+  const clock = mock.clock(on, { now: 100 * HOUR })
+  const w = world(on, { name: '💤 Builder' })
+  w.localAt = 100 * HOUR
+  w.text += bridgeUp(100 * HOUR - 10 * MIN) + '\n'
+  w.row(100 * HOUR - 5 * MIN)
+  await start($)
+  await clock.advance(4 * MIN)
+  expect(w.renames).toEqual(['Builder'])
 })
