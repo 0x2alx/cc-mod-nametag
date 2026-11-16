@@ -347,25 +347,21 @@ async function transcriptActivity($: Engine): Promise<number | null> {
   return end ? lastActivityIn(end.text) : null
 }
 
-// Whether Remote Control is behind on the name. It shows the name the server last heard, and a
+// Whether Remote Control may be behind on the name. It shows the name the server last heard: a
 // rename made while the bridge was down (the one at start comes before the bridge connects) never
-// reaches it: the newest /rename row is older than the newest "remote-control is active" row, and
-// came after the connect before that one, if any. A rename after the connect answers it.
+// reaches it, and a connect doesn't send the name. So any connect with no /rename after it: the
+// newest "remote-control is active" row is newer than the newest /rename row. A rename answers it.
 const RENAME_ROW = /^\s*<command-name>\/rename<\/command-name>/
 export function bridgeBehind(text: string): boolean {
   const lines = text.split('\n')
-  let connects = 0
   for (let i = lines.length - 1; i >= 0; i--) {
     const l = lines[i]!
     if (!l.includes('"subtype":"bridge_status"') && !(l.includes('"subtype":"local_command"') && l.includes('/rename'))) continue
     try {
       const row = JSON.parse(l)
       if (row?.type !== 'system' || row?.isSidechain === true) continue
-      if (row.subtype === 'bridge_status') {
-        if (++connects === 2) return false
-      } else if (row.subtype === 'local_command' && typeof row.content === 'string' && RENAME_ROW.test(row.content)) {
-        return connects === 1
-      }
+      if (row.subtype === 'bridge_status') return true
+      if (row.subtype === 'local_command' && typeof row.content === 'string' && RENAME_ROW.test(row.content)) return false
     } catch {}
   }
   return false

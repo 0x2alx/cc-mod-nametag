@@ -1637,17 +1637,18 @@ test('an idle session whose transcript has not changed is not read again until a
 const bridgeUp = (ms: number) => JSON.stringify({ type: 'system', subtype: 'bridge_status', content: '/remote-control is active', timestamp: new Date(ms).toISOString() })
 const renamed = (ms: number, name = 'x') => JSON.stringify({ type: 'system', subtype: 'local_command', content: `<command-name>/rename</command-name>\n            <command-args>${name}</command-args>`, timestamp: new Date(ms).toISOString() })
 
-test('bridgeBehind: a rename made before Remote Control connected', () => {
+test('bridgeBehind: a connect with no rename after it', () => {
   expect(bridgeBehind([renamed(1), bridgeUp(2)].join('\n'))).toBe(true) // the start: rename, then the bridge
   expect(bridgeBehind([bridgeUp(1), renamed(2)].join('\n'))).toBe(false) // renamed while connected
   expect(bridgeBehind([renamed(1), bridgeUp(2), renamed(3)].join('\n'))).toBe(false) // sent again
   expect(bridgeBehind([bridgeUp(1), renamed(2), bridgeUp(3), renamed(4), bridgeUp(5)].join('\n'))).toBe(true)
-  expect(bridgeBehind([renamed(1), bridgeUp(2), bridgeUp(3)].join('\n'))).toBe(false) // nothing between the connects
-  expect(bridgeBehind(bridgeUp(1))).toBe(false) // no rename at all
+  // a connect doesn't send the name: a restart with nothing to rename, connected again
+  expect(bridgeBehind([renamed(1), bridgeUp(2), bridgeUp(3)].join('\n'))).toBe(true)
+  expect(bridgeBehind(bridgeUp(1))).toBe(true) // the rename out of reach: the name is sent anyway
   expect(bridgeBehind(renamed(1))).toBe(false) // no Remote Control
   // a /topic or other local command is not a rename, nor a subagent's row
   const topic = JSON.stringify({ type: 'system', subtype: 'local_command', content: '<command-name>/topic</command-name> /rename', timestamp: new Date(1).toISOString() })
-  expect(bridgeBehind([topic, bridgeUp(2)].join('\n'))).toBe(false)
+  expect(bridgeBehind([renamed(1), bridgeUp(2), topic].join('\n'))).toBe(true)
   const side = JSON.stringify({ type: 'system', subtype: 'bridge_status', isSidechain: true, content: 'x' })
   expect(bridgeBehind([renamed(1), side].join('\n'))).toBe(false)
 })
@@ -1675,7 +1676,22 @@ test('no Remote Control, or a rename after it connected: nothing sent again', as
   w.localAt = 100 * HOUR
   w.text += bridgeUp(100 * HOUR - 10 * MIN) + '\n'
   w.row(100 * HOUR - 5 * MIN)
-  await start($)
+  await start($) // its rename comes after the connect
   await clock.advance(4 * MIN)
+  expect(w.renames).toEqual(['Builder'])
+})
+
+test('a restart with nothing to rename: the name is sent once after Remote Control connects', async ($, on) => {
+  const clock = mock.clock(on, { now: 100 * HOUR })
+  const w = world(on, { name: 'Builder' })
+  w.localAt = 100 * HOUR
+  w.text += renamed(100 * HOUR - 20 * MIN, 'Builder') + '\n' + bridgeUp(100 * HOUR - 20 * MIN + 600) + '\n'
+  w.row(100 * HOUR - 5 * MIN)
+  await start($)
+  expect(w.renames).toEqual([])
+  w.text += bridgeUp(100 * HOUR + 1000) + '\n'
+  await clock.advance(1 * MIN)
+  expect(w.renames).toEqual(['Builder'])
+  await clock.advance(3 * MIN)
   expect(w.renames).toEqual(['Builder'])
 })
