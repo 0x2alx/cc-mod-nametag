@@ -384,7 +384,7 @@ function loose(name: string, st: Style): { base: string; level: number; topic: s
   const { base: rest, topic } = exact(name, { ...st, levels: [] })
   const emojis = [...new Set(['💤', ...st.levels.map(l => l.emoji)])].map(escape).join('|')
   const mark = `[[({<]?(?:${emojis})+[\\])}>]?`
-  // a separator is signs ("-", "|", "·"), never an emoji: that belongs to the name ("🫪 🤖 Marvin")
+  // a separator is signs ("-", "|", "·"), never an emoji: that belongs to the name ("🫪 🤖 Robo")
   const join = '\\s+(?:[^\\p{L}\\p{N}\\s\\p{Extended_Pictographic}\\u{FE0F}\\u{200D}]{1,3}\\s+)?'
   const front = new RegExp(`^${mark}${join}`, 'u').exec(rest)
   if (front && rest.length > front[0].length) return { base: rest.slice(front[0].length), level: 1, topic }
