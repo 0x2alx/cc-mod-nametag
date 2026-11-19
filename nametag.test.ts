@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { bridgeBehind, cleanTopic, decompose, lastActivityIn, lastTopicCommand, leader, mentions, recentLines, runningTasks, style, turnEndedIn } from './hooks/register'
+import { bridgeBehind, cleanTopic, decompose, ownNamesIn, lastActivityIn, lastTopicCommand, leader, mentions, recentLines, runningTasks, style, turnEndedIn } from './hooks/register'
 
 const ID = 'aaaaaaaa-0000-4000-8000-000000000001'
 const CONFIG = '/u/.claude'
@@ -791,6 +791,46 @@ test('a name taken apart by the options used before, when the current ones find 
   expect(decompose('(😴🫪) 🚀 Nova', style({ brackets: '()', level1_emoji: '🫪', level2_emoji: '🫪' }), [style({ brackets: '()', level1_emoji: '😴', level2_emoji: '🫪' })]))
     .toEqual({ base: '🚀 Nova', level: 2, topic: null })
   expect(decompose('😴 Builder', st, [])).toEqual({ base: 'Builder', level: 1, topic: null })
+})
+
+// A topic read by an older style (topics on then, off now) is taken off only when the mod set it.
+const OLD_TOPIC_STYLE = { emojis: ['💤'], atEnd: false, sep: '', open: '', close: '', topic: true, topicSep: '', topicOpen: '[', topicClose: ']' }
+const modRow = (name: string) => JSON.stringify({ type: 'user', isMeta: true, origin: { kind: 'plugin', name: 'nametag' }, message: { content: `<system-reminder>\nThe user named this session "${name}". This may indicate the session's focus or intent.\n</system-reminder>` }, timestamp: new Date(1000).toISOString() }) + '\n'
+
+test('topics off now: a bracket the person typed at the end of the name is kept, though an older style had topics on', async ($, on) => {
+  mock.clock(on, { now: 10 * HOUR })
+  const w = world(on, { name: '🚀 Cortana 👽 [android]' })
+  w.row(10 * HOUR - MIN)
+  w.store.set('styles', [OLD_TOPIC_STYLE])
+  await start($)
+  expect(w.renames).toEqual([])
+})
+
+test('topics off now: a topic the mod set under the older style still comes off', async ($, on) => {
+  mock.clock(on, { now: 10 * HOUR })
+  const w = world(on)
+  w.text += modRow('🚀 Cortana 👽 [gigg]')
+  w.title('🚀 Cortana 👽 [gigg]')
+  w.row(10 * HOUR - MIN)
+  w.store.set('styles', [OLD_TOPIC_STYLE])
+  await start($)
+  expect(w.renames).toEqual(['🚀 Cortana 👽'])
+})
+
+test('an older style\'s topic counts only when one of the mod\'s own names had it', async () => {
+  const now = style({})
+  const old = style({ topic: 'on' })
+  expect(decompose('Nova [android]', now, [old], [])).toEqual({ base: 'Nova [android]', level: 0, topic: null })
+  expect(decompose('Nova [android]', now, [old], ['Nova [gigg]'])).toEqual({ base: 'Nova [android]', level: 0, topic: null })
+  expect(decompose('Nova [gigg]', now, [old], ['Nova [gigg]'])).toEqual({ base: 'Nova', level: 0, topic: 'gigg' })
+  // the current style's own topics are read as before; no `own` keeps the old behaviour
+  expect(decompose('Nova [android]', old, [], [])).toEqual({ base: 'Nova', level: 0, topic: 'android' })
+  expect(decompose('Nova [android]', now, [old])).toEqual({ base: 'Nova', level: 0, topic: 'android' })
+})
+
+test('the names the mod set, from its meta rows only (not the person\'s renames)', async () => {
+  const typed = JSON.stringify({ type: 'user', isMeta: true, message: { content: 'The user named this session "Mine [x]". This may indicate the session\'s focus or intent.' } })
+  expect(ownNamesIn(modRow('(💤) Nova [gigg]') + typed + '\n' + modRow('Say "hi" [q]'))).toEqual(['(💤) Nova [gigg]', 'Say "hi" [q]'])
 })
 
 test('the person\'s /rename while marked: their name stands, and is not activity: the mark the idle time calls for comes back', async ($, on) => {

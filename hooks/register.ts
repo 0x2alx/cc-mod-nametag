@@ -391,16 +391,44 @@ function escape(s: string): string {
 // topic at its end, by the current options or those it ran with before (`before`, from the store),
 // exactly; failing those, a run of the level emojis or 💤 at the front or the end. A name that only looks built ("💤 Notes", typed so)
 // is read the same way: the transcript can't say who set it.
-export function decompose(name: string, st: Style, before: readonly Style[] = []): { base: string; level: number; topic: string | null } {
+//
+// A topic an older style reads is taken off only when this mod set it: `own` holds the names the mod
+// set in this session (from the transcript). Otherwise a bracket the person typed at the end of a
+// name ("🚀 Cortana [android]") would be eaten whenever topics had been on once. Without `own`
+// (undefined) older styles' topics are trusted as before.
+export function decompose(name: string, st: Style, before: readonly Style[] = [], own?: readonly string[]): { base: string; level: number; topic: string | null } {
   // a mark built by the current options or one used before (saved in the store), exactly; then one
   // recognised loosely; else no mark, and the topic as the current options or older ones build it
   const styles = [st, ...before]
-  const all = styles.map(s => exact(name, s))
+  const all = styles.map((s, i) => {
+    const d = exact(name, s)
+    if (i === 0 || d.topic === null || own === undefined || own.some(n => exact(n, s).topic === d.topic)) return d
+    return exact(name, { ...s, topic: false })
+  })
   const marked = all.find(d => d.level > 0)
   if (marked) return marked
   const l = loose(name, st)
   if (l.level > 0) return l
   return all.find(d => d.topic !== null) ?? l
+}
+
+// The names a plugin set in this session, oldest first: Claude Code writes a meta row after each
+// rename ("The user named this session \"…\""), with origin plugin when a plugin ran it.
+const PLUGIN_ROW = '"kind":"plugin"'
+const NAMED = /named this session "(.*)"(?=[^"]*$)/s
+
+export function ownNamesIn(text: string): string[] {
+  const out: string[] = []
+  for (const l of text.split('\n')) {
+    if (!l.includes(PLUGIN_ROW) || !l.includes('named this session')) continue
+    try {
+      const row = JSON.parse(l)
+      if (row?.isMeta !== true || row?.origin?.kind !== 'plugin') continue
+      const m = NAMED.exec(textOf(row.message?.content))
+      if (m) out.push(m[1]!)
+    } catch {}
+  }
+  return out
 }
 
 // The name taken apart by one style exactly: its topic and its mark as that style builds them.
@@ -481,6 +509,23 @@ async function before($: Engine, st: Style): Promise<Style[]> {
   }))
 }
 
+// The names this mod set in this session, from the whole transcript (its plugin rows, searched
+// when only its end could be read).
+async function ownNames($: Engine): Promise<string[]> {
+  const end = await transcriptEnd($)
+  if (!end) return []
+  if (end.whole) return ownNamesIn(end.text)
+  const rows = await rowsWith($, end.path, PLUGIN_ROW)
+  return ownNamesIn(rows ?? end.text)
+}
+
+// The name taken apart by the current options and those used before; the transcript is read for the
+// mod's own names only when an older style had topics on.
+async function takeApart($: Engine, name: string, st: Style): Promise<{ base: string; level: number; topic: string | null }> {
+  const old = await before($, st)
+  return decompose(name, st, old, old.some(s => s.topic) ? await ownNames($) : undefined)
+}
+
 // At each start: the current options go first in the list (when they changed, the list changes).
 async function rememberStyle($: Engine, st: Style): Promise<void> {
   const list = await savedStyles($)
@@ -514,7 +559,7 @@ async function render($: Engine, st: Style, want: Want): Promise<'done' | 'retry
   const name = await currentName($)
   if (name === undefined) return 'retry'
   if (name === null || name.trim() === '') return 'done'
-  const now = decompose(name, st, await before($, st))
+  const now = await takeApart($, name, st)
   const level = Math.min(want.level ?? now.level, st.levels.length)
   let topic = want.topic !== undefined ? want.topic : now.topic
   if (!st.topic || topicOff || (topic && inName(now.base, topic))) topic = null
@@ -905,7 +950,7 @@ async function named($: Engine, st: Style): Promise<{ base: string; current: str
   await serial($, async () => {
     const name = await currentName($)
     if (!name || name.trim() === '') return
-    const d = decompose(name, st, await before($, st))
+    const d = await takeApart($, name, st)
     out = { base: d.base, current: d.topic }
   })
   return out
