@@ -37,6 +37,7 @@ type Engine = EngineInterface
 export type Level = { ms: number; emoji: string }
 
 const CHECK_MS = 60 * 1000
+const RESEND_MS = 60 * 1000 // the name goes to the server once more this long after each rename (`resend_seconds` changes it, 0 turns it off)
 const FS_READ_MAX = 4 * 1024 * 1024 // $.fs.read refuses bigger files
 const TAIL_BYTES = 512 * 1024 // a big transcript is read from its last this many bytes
 const TITLE_ROW = '"type":"custom-title"'
@@ -87,6 +88,8 @@ const origin = atom({ plugin: 'nametag', key: 'from' } as const, null as number 
 
 let lastActivity = 0 // from the transcript at start, then from the session's prompts and turns
 let sleeping: Promise<void> | undefined // the rename job in flight (see serial)
+let resendAfter = RESEND_MS // from `resend_seconds`
+let resendDue: { name: string; at: number } | undefined // the name this mod last set, to send once more at `at`
 let wakePending = false // the last attempt to take the mark off must be tried again
 let personRenames = 0 // the person's /renames seen so far
 let personName = '' // the name the last of them gave
@@ -381,6 +384,17 @@ async function resendForBridge($: Engine): Promise<boolean> {
   return true
 }
 
+// Sends the name this mod set once more, `resend_seconds` after the rename, when the session still
+// has that name (a rename by the person or the app since then stands). Once per rename.
+async function resentName($: Engine): Promise<boolean> {
+  const r = resendDue
+  if (!r || (await $.clock.now()) < r.at) return false
+  resendDue = undefined
+  if ((await currentName($)) !== r.name) return false
+  void serial($, () => rename($, r.name, false))
+  return true
+}
+
 // ---- the name, taken apart ---------------------------------------------------------------------
 
 function escape(s: string): string {
@@ -467,9 +481,13 @@ function loose(name: string, st: Style): { base: string; level: number; topic: s
 
 // ---- renaming ------------------------------------------------------------------------------
 
-async function rename($: Engine, name: string): Promise<boolean> {
+// The title write to the server fails now and then (about one in fifteen) and Claude Code doesn't
+// retry it, so the app keeps the old name. `again` (the default) sends the name once more later:
+// resentName() does it, once per rename (the resend itself passes false).
+async function rename($: Engine, name: string, again = true): Promise<boolean> {
   try {
     await $.command.run({ command: 'rename', args: name })
+    if (again && resendAfter > 0) resendDue = { name, at: (await $.clock.now()) + resendAfter }
     return true
   } catch (err) {
     $.ui.log(`nametag: rename failed: ${err}`, { to: 'debug' })
@@ -706,6 +724,7 @@ async function tick($: Engine, st: Style): Promise<void> {
   await adopted($, st)
   if (wakePending) return void serial($, () => unmark($, st))
   if (await resendForBridge($)) return
+  if (await resentName($)) return
   const now = await $.clock.now()
   const cheap = due(st, now - lastActivity)
   if (cheap === 0) return
@@ -1035,6 +1054,7 @@ async function adopt($: Engine, st: Style): Promise<void> {
 export const register: Register = (on, options) => {
   const st = style(options)
   maxWords = options.topic_words === 2 ? 2 : 1
+  resendAfter = typeof options.resend_seconds === 'number' && options.resend_seconds >= 0 ? Math.round(options.resend_seconds * 1000) : RESEND_MS
 
   on('session.start', async ($, e, next) => {
     const r = await next(e)

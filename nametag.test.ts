@@ -1,4 +1,4 @@
-import { expect, mock, test } from 'claude-code/testing'
+import { expect, mock, test as baseTest } from 'claude-code/testing'
 import { bridgeBehind, cleanTopic, decompose, ownNamesIn, lastActivityIn, lastTopicCommand, leader, mentions, recentLines, runningTasks, style, turnEndedIn } from './hooks/register'
 
 const ID = 'aaaaaaaa-0000-4000-8000-000000000001'
@@ -6,6 +6,12 @@ const CONFIG = '/u/.claude'
 const PROJECTS = ['-other-project', '-work-demo']
 const MIN = 60 * 1000
 const HOUR = 60 * MIN
+
+// The resend a minute after each rename is off unless a test asks for it (resend_seconds): the other tests count renames.
+function test(name: string, a: any, b?: any) {
+  const [o, fn] = b ? [a, b] : [{}, a]
+  return baseTest(name, { ...o, options: { resend_seconds: 0, ...(o.options ?? {}) } }, fn)
+}
 
 // A fake world beneath the mod: one transcript, /rename appending a title row to it.
 let current: any // the world of the test that runs
@@ -1734,4 +1740,47 @@ test('a restart with nothing to rename: the name is sent once after Remote Contr
   expect(w.renames).toEqual(['Builder'])
   await clock.advance(3 * MIN)
   expect(w.renames).toEqual(['Builder'])
+})
+
+// ---- the resend a minute after each rename (a title write to the server sometimes fails) ------
+
+test('a rename is sent once more about a minute later, and only once', { options: { resend_seconds: 60 } }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  await start($)
+  await clock.advance(11 * MIN)
+  expect(w.renames).toEqual(['💤 Builder', '💤 Builder']) // the rename, then its resend (within the next two checks)
+  await clock.advance(30 * MIN)
+  expect(w.renames).toEqual(['💤 Builder', '💤 Builder']) // no third, no resend of the resend
+})
+
+test('the resend is skipped when the name changed meanwhile', { options: { resend_seconds: 60 } }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  await start($)
+  await clock.advance(10 * MIN + 10 * 1000) // asleep: '💤 Builder' just set
+  expect(w.renames).toEqual(['💤 Builder'])
+  await personRename($, '🚀 Other')
+  await clock.advance(3 * MIN)
+  expect(w.renames.filter(n => n === '💤 Builder')).toHaveLength(1) // only the original one
+})
+
+test('resend_seconds: 0 sends nothing more', { options: { resend_seconds: 0 } }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  await start($)
+  await clock.advance(11 * MIN)
+  await clock.advance(10 * MIN)
+  expect(w.renames).toEqual(['💤 Builder'])
+})
+
+test('a failed resend is not tried again', { options: { resend_seconds: 60 } }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on, { name: 'Builder' })
+  await start($)
+  await clock.advance(10 * MIN + 10 * 1000)
+  w.failRenames = 1 // the resend is refused
+  await clock.advance(5 * MIN)
+  expect(w.renames).toEqual(['💤 Builder'])
+  expect(w.attempts).toBe(2)
 })

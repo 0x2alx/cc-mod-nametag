@@ -1,7 +1,7 @@
 {
   "name": "nametag",
   "displayName": "nametag",
-  "version": "0.19.7",
+  "version": "0.20.0",
   "description": "Tags each session's name with what it is doing: an idle mark (💤, 💤💤, 💤💤💤) cleared at the next turn, and optionally a short topic of the current work at the end",
   "author": {
     "name": "0x2alx"
@@ -124,6 +124,14 @@
         "{}",
         "<>"
       ]
+    },
+    "resend_seconds": {
+      "type": "number",
+      "title": "Resend the name after (seconds)",
+      "description": "After each rename the name is sent to the server once more this many seconds later, because a title write now and then fails without a retry and the app keeps the old name. 0 turns it off",
+      "default": 60,
+      "min": 0,
+      "max": 600
     },
     "topic_words": {
       "type": "number",
